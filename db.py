@@ -1,8 +1,11 @@
+import os
 from pathlib import Path
 
 import aiosqlite
 
-DB_PATH = Path(__file__).parent / "bot.db"
+_DATA_DIR = Path(os.environ.get("DATA_DIR") or Path(__file__).parent)
+_DATA_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = _DATA_DIR / "bot.db"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (

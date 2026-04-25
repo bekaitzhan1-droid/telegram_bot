@@ -229,17 +229,18 @@ async def show_welcome(msg: Message, state: FSMContext):
 async def start_new_polis(msg: Message, state: FSMContext):
     await state.clear()
     await ensure_user(msg.from_user.id, msg.from_user.username, msg.from_user.first_name)
-    balance = await get_balance(msg.from_user.id)
-    if balance < POLIS_PRICE:
-        await msg.answer(
-            f"⚠️ Балансыңыз жеткіліксіз.\n\n"
-            f"Қажет: <b>{fmt_money(POLIS_PRICE)}</b>\n"
-            f"Балансыңыз: <b>{fmt_money(balance)}</b>\n\n"
-            f"Толтыру үшін <b>💳 Толтыру</b> батырмасын басыңыз.",
-            parse_mode="HTML",
-            reply_markup=main_menu(),
-        )
-        return
+    if not is_admin(msg.from_user.id):
+        balance = await get_balance(msg.from_user.id)
+        if balance < POLIS_PRICE:
+            await msg.answer(
+                f"⚠️ Балансыңыз жеткіліксіз.\n\n"
+                f"Қажет: <b>{fmt_money(POLIS_PRICE)}</b>\n"
+                f"Балансыңыз: <b>{fmt_money(balance)}</b>\n\n"
+                f"Толтыру үшін <b>💳 Толтыру</b> батырмасын басыңыз.",
+                parse_mode="HTML",
+                reply_markup=main_menu(),
+            )
+            return
     await msg.answer(
         "<b>Полисте неше адам?</b>",
         parse_mode="HTML",
@@ -729,28 +730,34 @@ async def on_restart(cb: CallbackQuery, state: FSMContext):
 @dp.callback_query(Form.final_confirm, F.data == "fin:yes")
 async def on_final_yes(cb: CallbackQuery, state: FSMContext):
     user_id = cb.from_user.id
-    new_balance = await change_balance(user_id, -POLIS_PRICE, "polis", meta="reserve")
-    if new_balance is None:
-        current = await get_balance(user_id)
-        await cb.answer()
-        await cb.message.edit_reply_markup(reply_markup=None)
-        await cb.message.answer(
-            f"⚠️ Балансыңыз жеткіліксіз.\n\n"
-            f"Қажет: <b>{fmt_money(POLIS_PRICE)}</b>\n"
-            f"Балансыңыз: <b>{fmt_money(current)}</b>\n\n"
-            f"Толтыру үшін — /topup",
-            parse_mode="HTML",
-        )
-        await state.clear()
-        return
+    admin = is_admin(user_id)
+    new_balance = None
+    if not admin:
+        new_balance = await change_balance(user_id, -POLIS_PRICE, "polis", meta="reserve")
+        if new_balance is None:
+            current = await get_balance(user_id)
+            await cb.answer()
+            await cb.message.edit_reply_markup(reply_markup=None)
+            await cb.message.answer(
+                f"⚠️ Балансыңыз жеткіліксіз.\n\n"
+                f"Қажет: <b>{fmt_money(POLIS_PRICE)}</b>\n"
+                f"Балансыңыз: <b>{fmt_money(current)}</b>\n\n"
+                f"Толтыру үшін — /topup",
+                parse_mode="HTML",
+            )
+            await state.clear()
+            return
 
     await cb.answer("Құжат жасалып жатыр…")
     await cb.message.edit_reply_markup(reply_markup=None)
-    wait_msg = await cb.message.answer(
-        f"⏳ PDF жасалып жатыр…\n"
-        f"Баланстан ұсталды: <b>−{fmt_money(POLIS_PRICE)}</b> (баланс: {fmt_money(new_balance)})",
-        parse_mode="HTML",
-    )
+    if admin:
+        wait_msg = await cb.message.answer("⏳ PDF жасалып жатыр… (тегін, админ)")
+    else:
+        wait_msg = await cb.message.answer(
+            f"⏳ PDF жасалып жатыр…\n"
+            f"Баланстан ұсталды: <b>−{fmt_money(POLIS_PRICE)}</b> (баланс: {fmt_money(new_balance)})",
+            parse_mode="HTML",
+        )
 
     data = await state.get_data()
     safe_no = re.sub(r"[^A-Za-z0-9_-]", "_", data.get("dogovor_no") or "empty")
@@ -765,22 +772,28 @@ async def on_final_yes(cb: CallbackQuery, state: FSMContext):
     try:
         await generate_pdf(data, pdf_path)
     except PdfError as e:
-        refunded = await change_balance(user_id, POLIS_PRICE, "refund", meta=str(e))
-        await wait_msg.edit_text(
-            f"❌ Қате: {h(str(e))}\n\n"
-            f"Баланс қайтарылды: <b>+{fmt_money(POLIS_PRICE)}</b> (баланс: {fmt_money(refunded or 0)})",
-            parse_mode="HTML",
-        )
+        if not admin:
+            refunded = await change_balance(user_id, POLIS_PRICE, "refund", meta=str(e))
+            await wait_msg.edit_text(
+                f"❌ Қате: {h(str(e))}\n\n"
+                f"Баланс қайтарылды: <b>+{fmt_money(POLIS_PRICE)}</b> (баланс: {fmt_money(refunded or 0)})",
+                parse_mode="HTML",
+            )
+        else:
+            await wait_msg.edit_text(f"❌ Қате: {h(str(e))}", parse_mode="HTML")
         await state.clear()
         return
     except Exception as e:
         logging.exception("generate_pdf failed")
-        refunded = await change_balance(user_id, POLIS_PRICE, "refund", meta=f"unexpected: {e}")
-        await wait_msg.edit_text(
-            f"❌ Белгісіз қате: {h(str(e))}\n\n"
-            f"Баланс қайтарылды: <b>+{fmt_money(POLIS_PRICE)}</b> (баланс: {fmt_money(refunded or 0)})",
-            parse_mode="HTML",
-        )
+        if not admin:
+            refunded = await change_balance(user_id, POLIS_PRICE, "refund", meta=f"unexpected: {e}")
+            await wait_msg.edit_text(
+                f"❌ Белгісіз қате: {h(str(e))}\n\n"
+                f"Баланс қайтарылды: <b>+{fmt_money(POLIS_PRICE)}</b> (баланс: {fmt_money(refunded or 0)})",
+                parse_mode="HTML",
+            )
+        else:
+            await wait_msg.edit_text(f"❌ Белгісіз қате: {h(str(e))}", parse_mode="HTML")
         await state.clear()
         return
 
@@ -788,13 +801,14 @@ async def on_final_yes(cb: CallbackQuery, state: FSMContext):
         await wait_msg.delete()
     except Exception:
         pass
-    final_balance = await get_balance(user_id)
+    if admin:
+        caption = "✅ Полис дайын!"
+    else:
+        final_balance = await get_balance(user_id)
+        caption = f"✅ Полис дайын!\nҚалған баланс: <b>{fmt_money(final_balance)}</b>"
     await cb.message.answer_document(
         FSInputFile(pdf_path, filename=filename_display),
-        caption=(
-            f"✅ Полис дайын!\n"
-            f"Қалған баланс: <b>{fmt_money(final_balance)}</b>"
-        ),
+        caption=caption,
         parse_mode="HTML",
     )
     await state.clear()

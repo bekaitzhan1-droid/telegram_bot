@@ -35,14 +35,37 @@ async def init_db():
         await db.commit()
 
 
-async def ensure_user(telegram_id: int, username: str | None, first_name: str | None):
+async def ensure_user(
+    telegram_id: int,
+    username: str | None,
+    first_name: str | None,
+    welcome_bonus: int = 0,
+) -> bool:
+    """Returns True if user was newly created (and credited with welcome_bonus, if any)."""
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO users (telegram_id, username, first_name) VALUES (?, ?, ?) "
-            "ON CONFLICT(telegram_id) DO UPDATE SET username = excluded.username, first_name = excluded.first_name",
-            (telegram_id, username, first_name),
-        )
+        await db.execute("BEGIN IMMEDIATE")
+        async with db.execute(
+            "SELECT 1 FROM users WHERE telegram_id = ?", (telegram_id,)
+        ) as cur:
+            existed = await cur.fetchone() is not None
+        if existed:
+            await db.execute(
+                "UPDATE users SET username = ?, first_name = ? WHERE telegram_id = ?",
+                (username, first_name, telegram_id),
+            )
+        else:
+            initial_balance = max(0, welcome_bonus)
+            await db.execute(
+                "INSERT INTO users (telegram_id, username, first_name, balance) VALUES (?, ?, ?, ?)",
+                (telegram_id, username, first_name, initial_balance),
+            )
+            if initial_balance > 0:
+                await db.execute(
+                    "INSERT INTO transactions (telegram_id, amount, type, meta) VALUES (?, ?, ?, ?)",
+                    (telegram_id, initial_balance, "topup", "welcome bonus"),
+                )
         await db.commit()
+        return not existed
 
 
 async def get_balance(telegram_id: int) -> int:

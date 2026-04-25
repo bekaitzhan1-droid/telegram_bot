@@ -13,6 +13,7 @@ load_dotenv()
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_IDS = {int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
 POLIS_PRICE = int(os.environ.get("POLIS_PRICE", "2000"))
+WELCOME_BONUS = int(os.environ.get("WELCOME_BONUS", "5000"))
 KASPI_CARD_INFO = os.environ.get("KASPI_CARD_INFO", "").replace("\\n", "\n")
 
 from aiogram import Bot, Dispatcher, F
@@ -226,12 +227,18 @@ def main_menu() -> ReplyKeyboardMarkup:
 
 async def show_welcome(msg: Message, state: FSMContext):
     await state.clear()
-    await ensure_user(msg.from_user.id, msg.from_user.username, msg.from_user.first_name)
+    is_new = await ensure_user(
+        msg.from_user.id, msg.from_user.username, msg.from_user.first_name, WELCOME_BONUS
+    )
     balance = await get_balance(msg.from_user.id)
     polises_left = balance // POLIS_PRICE
 
-    greeting = (
-        f"Здравствуйте, <b>{h(msg.from_user.first_name or 'клиент')}</b>!\n\n"
+    greeting = f"Здравствуйте, <b>{h(msg.from_user.first_name or 'клиент')}</b>!\n\n"
+    if is_new and WELCOME_BONUS > 0:
+        greeting += (
+            f"🎁 Приветственный бонус: <b>+{fmt_money(WELCOME_BONUS)}</b> зачислен на ваш баланс.\n\n"
+        )
+    greeting += (
         f"💰 Ваш баланс: <b>{fmt_money(balance)}</b>\n"
         f"📄 1 полис = <b>{fmt_money(POLIS_PRICE)}</b> (хватит на {polises_left} полисов)\n\n"
     )
@@ -244,7 +251,7 @@ async def show_welcome(msg: Message, state: FSMContext):
 
 async def start_new_polis(msg: Message, state: FSMContext):
     await state.clear()
-    await ensure_user(msg.from_user.id, msg.from_user.username, msg.from_user.first_name)
+    await ensure_user(msg.from_user.id, msg.from_user.username, msg.from_user.first_name, WELCOME_BONUS)
     if not is_admin(msg.from_user.id):
         balance = await get_balance(msg.from_user.id)
         if balance < POLIS_PRICE:
@@ -326,7 +333,7 @@ async def cancel(msg: Message, state: FSMContext):
 
 @dp.message(Command("balance"))
 async def cmd_balance(msg: Message):
-    await ensure_user(msg.from_user.id, msg.from_user.username, msg.from_user.first_name)
+    await ensure_user(msg.from_user.id, msg.from_user.username, msg.from_user.first_name, WELCOME_BONUS)
     balance = await get_balance(msg.from_user.id)
     txs = await list_recent_transactions(msg.from_user.id, 5)
 

@@ -451,7 +451,8 @@ async def on_period(cb: CallbackQuery, state: FSMContext):
     await state.update_data(period=key)
     await cb.message.edit_text(f"Срок: <b>{h(PERIODS[key]['label'])}</b> ✅", parse_mode="HTML")
     await cb.message.answer(
-        "<b>Сумма страховки</b> в тенге? Введите число:",
+        "<b>Введите сумму страховки в тенге.</b>\n"
+        "Например: <code>15000</code>",
         parse_mode="HTML",
     )
     await state.set_state(Form.sum_input)

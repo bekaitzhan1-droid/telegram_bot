@@ -1,8 +1,10 @@
 import asyncio
 import calendar
+import json
 import logging
 import os
 import re
+import secrets
 from datetime import date, timedelta
 from html import escape as h
 from pathlib import Path
@@ -39,9 +41,15 @@ from db import (
     change_balance,
     ensure_user,
     get_balance,
+    get_polis_by_trace_id,
+    has_welcome_bonus,
     init_db,
+    is_tos_accepted,
+    list_recent_polises,
     list_recent_transactions,
     list_users,
+    log_polis,
+    set_tos_accepted,
 )
 from nsk import fetch_bonus_malus
 from pdf import PdfError, generate_pdf
@@ -72,6 +80,37 @@ DISCLAIMER = (
     "использование не допускаются. Ответственность за нарушение указанных "
     "условий несёт пользователь самостоятельно.</i>"
 )
+
+TOS_TEXT = (
+    "<b>📋 Пользовательское соглашение</b>\n\n"
+    "Используя данный сервис, пользователь подтверждает согласие со следующими условиями:\n\n"
+    "<b>1. Достоверность данных.</b>\n"
+    "Пользователь самостоятельно вводит сведения для оформления полиса (ФИО, ИИН, "
+    "данные ТС и т.п.) и несёт полную ответственность за их достоверность.\n\n"
+    "<b>2. Назначение документа.</b>\n"
+    "Полученный полис предназначен исключительно для личного использования держателем "
+    "полиса. Передача документа третьим лицам, перепродажа, изменение или повторное "
+    "использование не допускаются.\n\n"
+    "<b>3. Журнал операций.</b>\n"
+    "Сервис ведёт журнал всех созданных документов: Telegram ID пользователя, ФИО и "
+    "ИИН застрахованных, сведения о ТС, дата и время. Эти данные могут быть переданы "
+    "по запросу страховой компании или уполномоченных органов РК.\n\n"
+    "<b>4. Запрет на противоправное использование.</b>\n"
+    "Использование сервиса с целью введения третьих лиц в заблуждение, мошенничества "
+    "или подделки документов запрещено и влечёт ответственность пользователя по "
+    "законодательству Республики Казахстан.\n\n"
+    "<b>5. Ограничение ответственности сервиса.</b>\n"
+    "Сервис не несёт ответственности за действия пользователя, нарушающие условия "
+    "настоящего соглашения, а также за последствия передачи документа третьим лицам.\n\n"
+    "<b>6. Принятие условий.</b>\n"
+    "Нажатие кнопки «✅ Согласен» означает полное и безоговорочное принятие настоящих условий."
+)
+
+
+def gen_trace_id() -> str:
+    """8-char trace ID without confusing chars (no 0/O, 1/I)."""
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "".join(secrets.choice(alphabet) for _ in range(8))
 
 
 class Form(StatesGroup):
@@ -193,6 +232,13 @@ def final_confirm_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def tos_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Согласен — принимаю условия", callback_data="tos:yes")],
+        [InlineKeyboardButton(text="❌ Не согласен", callback_data="tos:no")],
+    ])
+
+
 def people_count_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=str(n), callback_data=f"pc:{n}") for n in range(1, 6)],
@@ -227,18 +273,19 @@ def main_menu() -> ReplyKeyboardMarkup:
 
 async def show_welcome(msg: Message, state: FSMContext):
     await state.clear()
-    is_new = await ensure_user(
-        msg.from_user.id, msg.from_user.username, msg.from_user.first_name, WELCOME_BONUS
-    )
-    balance = await get_balance(msg.from_user.id)
+    await ensure_user(msg.from_user.id, msg.from_user.username, msg.from_user.first_name)
+    if not await is_tos_accepted(msg.from_user.id):
+        await msg.answer(TOS_TEXT, parse_mode="HTML", reply_markup=tos_keyboard())
+        return
+    await _send_main_greeting(msg, msg.from_user.first_name, msg.from_user.id)
+
+
+async def _send_main_greeting(message: Message, first_name: str | None, user_id: int):
+    balance = await get_balance(user_id)
     polises_left = balance // POLIS_PRICE
 
-    greeting = f"Здравствуйте, <b>{h(msg.from_user.first_name or 'клиент')}</b>!\n\n"
-    if is_new and WELCOME_BONUS > 0:
-        greeting += (
-            f"🎁 Приветственный бонус: <b>+{fmt_money(WELCOME_BONUS)}</b> зачислен на ваш баланс.\n\n"
-        )
-    greeting += (
+    greeting = (
+        f"Здравствуйте, <b>{h(first_name or 'клиент')}</b>!\n\n"
         f"💰 Ваш баланс: <b>{fmt_money(balance)}</b>\n"
         f"📄 1 полис = <b>{fmt_money(POLIS_PRICE)}</b> (хватит на {polises_left} полисов)\n\n"
     )
@@ -246,12 +293,15 @@ async def show_welcome(msg: Message, state: FSMContext):
         greeting += "⚠️ Недостаточно средств на балансе. Используйте кнопку <b>💳 Пополнить</b> ниже.\n\n"
     greeting += "Выберите действие в меню или нажмите <b>Новый полис</b>."
 
-    await msg.answer(greeting, parse_mode="HTML", reply_markup=main_menu())
+    await message.answer(greeting, parse_mode="HTML", reply_markup=main_menu())
 
 
 async def start_new_polis(msg: Message, state: FSMContext):
     await state.clear()
-    await ensure_user(msg.from_user.id, msg.from_user.username, msg.from_user.first_name, WELCOME_BONUS)
+    await ensure_user(msg.from_user.id, msg.from_user.username, msg.from_user.first_name)
+    if not await is_tos_accepted(msg.from_user.id):
+        await msg.answer(TOS_TEXT, parse_mode="HTML", reply_markup=tos_keyboard())
+        return
     if not is_admin(msg.from_user.id):
         balance = await get_balance(msg.from_user.id)
         if balance < POLIS_PRICE:
@@ -300,6 +350,39 @@ async def on_people_count(cb: CallbackQuery, state: FSMContext):
 @dp.message(CommandStart())
 async def start(msg: Message, state: FSMContext):
     await show_welcome(msg, state)
+
+
+@dp.callback_query(F.data == "tos:yes")
+async def on_tos_yes(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await ensure_user(cb.from_user.id, cb.from_user.username, cb.from_user.first_name)
+    await set_tos_accepted(cb.from_user.id)
+
+    bonus_line = ""
+    if WELCOME_BONUS > 0 and not await has_welcome_bonus(cb.from_user.id):
+        await change_balance(cb.from_user.id, WELCOME_BONUS, "topup", meta="welcome bonus")
+        bonus_line = (
+            f"\n\n🎁 Приветственный бонус: <b>+{fmt_money(WELCOME_BONUS)}</b> "
+            f"зачислен на ваш баланс."
+        )
+
+    await cb.message.edit_text(
+        "✅ Пользовательское соглашение принято." + bonus_line,
+        parse_mode="HTML",
+    )
+    await _send_main_greeting(cb.message, cb.from_user.first_name, cb.from_user.id)
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "tos:no")
+async def on_tos_no(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.message.edit_text(
+        "Без принятия пользовательского соглашения сервис недоступен.\n"
+        "Если передумаете — нажмите /start.",
+        parse_mode="HTML",
+    )
+    await cb.answer()
 
 
 @dp.message(F.text == BTN_NEW_POLIS)
@@ -387,6 +470,8 @@ async def cmd_help(msg: Message):
             "\n<b>Админ-команды:</b>\n"
             "<code>/add_balance USER_ID СУММА</code> — пополнить баланс пользователя (пример: <code>/add_balance 123456 10000</code>)\n"
             "<code>/users</code> — список пользователей\n"
+            "<code>/audit</code> — последние 20 созданных полисов\n"
+            "<code>/log TRACE_ID</code> — детальный отчёт по ID полиса\n"
         )
     await msg.answer(text, parse_mode="HTML", reply_markup=main_menu())
 
@@ -419,6 +504,74 @@ async def cmd_add_balance(msg: Message):
         )
     except Exception:
         pass
+
+
+@dp.message(Command("log"))
+async def cmd_log(msg: Message):
+    if not is_admin(msg.from_user.id):
+        return
+    parts = (msg.text or "").split()
+    if len(parts) != 2:
+        await msg.answer("Использование: <code>/log TRACE_ID</code>", parse_mode="HTML")
+        return
+    trace_id = parts[1].upper()
+    log = await get_polis_by_trace_id(trace_id)
+    if not log:
+        await msg.answer(f"Полис <code>{h(trace_id)}</code> не найден.", parse_mode="HTML")
+        return
+    persons = json.loads(log.get("persons_json") or "[]")
+    persons_lines = []
+    for i, p in enumerate(persons, 1):
+        persons_lines.append(
+            f"  {i}. {h(p.get('fio', ''))} | "
+            f"ИИН: <code>{h(p.get('iin') or '(нет)')}</code> | "
+            f"Кл: {h(p.get('klass') or '-')}"
+        )
+    persons_text = "\n".join(persons_lines) or "  (нет)"
+
+    user_label = f"<code>{log['telegram_id']}</code>"
+    if log.get('username'):
+        user_label += f" (@{h(log['username'])})"
+    if log.get('first_name'):
+        user_label += f" — {h(log['first_name'])}"
+
+    text = (
+        f"<b>📋 Полис {h(log['trace_id'])}</b>\n\n"
+        f"<b>Создал:</b> {user_label}\n"
+        f"<b>Дата:</b> {log['created_at']}\n\n"
+        f"<b>Договор №:</b> <code>{h(log.get('dogovor_no') or '(пусто)')}</code>\n"
+        f"<b>Сумма:</b> {h(log.get('amount') or '')}\n"
+        f"<b>Период:</b> {h(log.get('date_from') or '')} — {h(log.get('date_to') or '')}\n\n"
+        f"<b>Авто:</b> {h(log.get('car_brand') or '')} | "
+        f"<code>{h(log.get('car_number') or '')}</code> | "
+        f"VIN: <code>{h(log.get('vin') or '')}</code>\n\n"
+        f"<b>Застрахованные:</b>\n{persons_text}"
+    )
+    await msg.answer(text, parse_mode="HTML")
+
+
+@dp.message(Command("audit"))
+async def cmd_audit(msg: Message):
+    if not is_admin(msg.from_user.id):
+        return
+    rows = await list_recent_polises(20)
+    if not rows:
+        await msg.answer("Журнал пуст.")
+        return
+    lines = ["<b>Последние 20 полисов:</b>\n"]
+    for r in rows:
+        date_str = str(r['created_at'])[:16]
+        user_label = f"<code>{r['telegram_id']}</code>"
+        if r.get('username'):
+            user_label += f" @{h(r['username'])}"
+        elif r.get('first_name'):
+            user_label += f" {h(r['first_name'])}"
+        lines.append(
+            f"<code>{r['trace_id']}</code> | {date_str} | {user_label} | "
+            f"{h(r.get('car_number') or '-')}"
+        )
+    lines.append("\nДеталь: <code>/log TRACE_ID</code>")
+    await msg.answer("\n".join(lines), parse_mode="HTML")
 
 
 @dp.message(Command("users"))
@@ -869,11 +1022,24 @@ async def on_final_yes(cb: CallbackQuery, state: FSMContext):
         await wait_msg.delete()
     except Exception:
         pass
+
+    trace_id = gen_trace_id()
+    try:
+        await log_polis(
+            trace_id, user_id, cb.from_user.username, cb.from_user.first_name, data
+        )
+    except Exception:
+        logging.exception("log_polis failed")
+
+    trace_line = f"\n🔖 ID документа: <code>{trace_id}</code>"
     if admin:
-        caption = "✅ Полис готов!" + DISCLAIMER
+        caption = "✅ Полис готов!" + trace_line + DISCLAIMER
     else:
         final_balance = await get_balance(user_id)
-        caption = f"✅ Полис готов!\nОстаток баланса: <b>{fmt_money(final_balance)}</b>" + DISCLAIMER
+        caption = (
+            f"✅ Полис готов!\nОстаток баланса: <b>{fmt_money(final_balance)}</b>"
+            + trace_line + DISCLAIMER
+        )
     await cb.message.answer_document(
         FSInputFile(pdf_path, filename=filename_display),
         caption=caption,
@@ -897,6 +1063,8 @@ async def setup_bot_commands():
     admin = common + [
         BotCommand(command="add_balance", description="Пополнить баланс пользователя"),
         BotCommand(command="users", description="Список пользователей"),
+        BotCommand(command="audit", description="Журнал последних полисов"),
+        BotCommand(command="log", description="Детали полиса по ID"),
     ]
     for admin_id in ADMIN_IDS:
         try:

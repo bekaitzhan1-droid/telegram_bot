@@ -67,17 +67,18 @@ STANDARD_DOGOVOR_NO = "0656T160437N"
 
 
 class Form(StatesGroup):
+    people_count = State()
     company = State()
     period = State()
     sum_input = State()
     sum_confirm = State()
     dogovor_choice = State()
     dogovor_manual = State()
-    iin_choice = State()
-    iin_input = State()
-    iin_confirm = State()
-    fio = State()
-    klass = State()
+    p_iin_choice = State()
+    p_iin_input = State()
+    p_iin_confirm = State()
+    p_fio = State()
+    p_klass = State()
     car_brand = State()
     car_number = State()
     vin = State()
@@ -175,6 +176,12 @@ def final_confirm_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def people_count_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=str(n), callback_data=f"pc:{n}") for n in range(1, 6)],
+    ])
+
+
 def fmt_money(n: int) -> str:
     return f"{n:,} тг".replace(",", " ")
 
@@ -234,11 +241,28 @@ async def start_new_polis(msg: Message, state: FSMContext):
         )
         return
     await msg.answer(
+        "<b>Полисте неше адам?</b>",
+        parse_mode="HTML",
+        reply_markup=people_count_keyboard(),
+    )
+    await state.set_state(Form.people_count)
+
+
+@dp.callback_query(Form.people_count, F.data.startswith("pc:"))
+async def on_people_count(cb: CallbackQuery, state: FSMContext):
+    n = int(cb.data.split(":", 1)[1])
+    if not (1 <= n <= 5):
+        await cb.answer("Қате", show_alert=True)
+        return
+    await state.update_data(people_count=n, persons=[], current_person=0)
+    await cb.message.edit_text(f"Адам саны: <b>{n}</b> ✅", parse_mode="HTML")
+    await cb.message.answer(
         "<b>Қай компанияның полисін шығарамыз?</b>",
         parse_mode="HTML",
         reply_markup=company_keyboard(),
     )
     await state.set_state(Form.company)
+    await cb.answer()
 
 
 @dp.message(CommandStart())
@@ -471,37 +495,67 @@ async def on_dogovor_manual_input(msg: Message, state: FSMContext):
     await _ask_iin(msg, state)
 
 
+def _person_label(idx: int, total: int) -> str:
+    return "Сақтанушы (1)" if idx == 0 else f"{idx + 1}-ші адам"
+
+
+def _ensure_person(persons: list, idx: int) -> list:
+    persons = list(persons)
+    while len(persons) <= idx:
+        persons.append({})
+    return persons
+
+
 async def _ask_iin(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    idx = data.get("current_person", 0)
+    n = data.get("people_count", 1)
     await msg.answer(
-        "<b>Сақтанушы:</b>",
+        f"<b>{_person_label(idx, n)} ({idx + 1}/{n}):</b>",
         parse_mode="HTML",
         reply_markup=iin_choice_keyboard(),
     )
-    await state.set_state(Form.iin_choice)
+    await state.set_state(Form.p_iin_choice)
 
 
-@dp.callback_query(Form.iin_choice, F.data == "iin:kz")
-async def on_iin_kz(cb: CallbackQuery, state: FSMContext):
-    await state.update_data(foreign=False)
-    await cb.message.edit_text("Сақтанушы: <b>ҚР азаматы</b> ✅", parse_mode="HTML")
+@dp.callback_query(Form.p_iin_choice, F.data == "iin:kz")
+async def on_p_iin_kz(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    idx = data.get("current_person", 0)
+    n = data.get("people_count", 1)
+    await cb.message.edit_text(
+        f"{_person_label(idx, n)}: <b>ҚР азаматы</b> ✅", parse_mode="HTML"
+    )
     await cb.message.answer("<b>ИИН жазыңыз</b>:", parse_mode="HTML")
-    await state.set_state(Form.iin_input)
+    await state.set_state(Form.p_iin_input)
     await cb.answer()
 
 
-@dp.callback_query(Form.iin_choice, F.data == "iin:foreign")
-async def on_iin_foreign(cb: CallbackQuery, state: FSMContext):
-    await state.update_data(iin="", klass="", foreign=True)
-    await cb.message.edit_text("Сақтанушы: <b>Шетел азаматы</b> ✅", parse_mode="HTML")
+@dp.callback_query(Form.p_iin_choice, F.data == "iin:foreign")
+async def on_p_iin_foreign(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    idx = data.get("current_person", 0)
+    n = data.get("people_count", 1)
+    persons = _ensure_person(data.get("persons", []), idx)
+    persons[idx] = {"fio": "", "iin": "", "klass": "", "foreign": True}
+    await state.update_data(persons=persons)
+    await cb.message.edit_text(
+        f"{_person_label(idx, n)}: <b>Шетел азаматы</b> ✅", parse_mode="HTML"
+    )
     await cb.message.answer("<b>ФИО</b>:", parse_mode="HTML")
-    await state.set_state(Form.fio)
+    await state.set_state(Form.p_fio)
     await cb.answer()
 
 
-@dp.message(Form.iin_input, F.text)
-async def on_iin_input(msg: Message, state: FSMContext):
+@dp.message(Form.p_iin_input, F.text)
+async def on_p_iin_input(msg: Message, state: FSMContext):
     iin = msg.text.strip()
-    await state.update_data(iin=iin)
+    data = await state.get_data()
+    idx = data.get("current_person", 0)
+    persons = _ensure_person(data.get("persons", []), idx)
+    persons[idx] = {**persons[idx], "iin": iin, "foreign": False}
+    await state.update_data(persons=persons)
+
     wait_msg = await msg.answer("🔎 Іздеп жатырмын…")
     result = await fetch_bonus_malus(iin)
     try:
@@ -518,58 +572,87 @@ async def on_iin_input(msg: Message, state: FSMContext):
             parse_mode="HTML",
             reply_markup=iin_confirm_keyboard(),
         )
-        await state.set_state(Form.iin_confirm)
+        await state.set_state(Form.p_iin_confirm)
     else:
         await msg.answer(
             "Табылмады. <b>ФИО</b> өзіңіз жазыңыз:",
             parse_mode="HTML",
         )
-        await state.set_state(Form.fio)
+        await state.set_state(Form.p_fio)
 
 
-@dp.callback_query(Form.iin_confirm, F.data == "ic:yes")
-async def on_iin_confirm_yes(cb: CallbackQuery, state: FSMContext):
+@dp.callback_query(Form.p_iin_confirm, F.data == "ic:yes")
+async def on_p_iin_confirm_yes(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    await state.update_data(fio=data.get("nsk_fio", ""), klass=data.get("nsk_class", ""))
+    idx = data.get("current_person", 0)
+    persons = _ensure_person(data.get("persons", []), idx)
+    persons[idx] = {
+        **persons[idx],
+        "fio": data.get("nsk_fio", ""),
+        "klass": data.get("nsk_class", ""),
+    }
+    await state.update_data(persons=persons)
     await cb.message.edit_reply_markup(reply_markup=None)
-    await _ask_car_brand(cb.message, state)
+    await _next_person_or_car(cb.message, state)
     await cb.answer()
 
 
-@dp.callback_query(Form.iin_confirm, F.data == "ic:no")
-async def on_iin_confirm_no(cb: CallbackQuery, state: FSMContext):
+@dp.callback_query(Form.p_iin_confirm, F.data == "ic:no")
+async def on_p_iin_confirm_no(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_reply_markup(reply_markup=None)
     await cb.message.answer("<b>ФИО</b> өзіңіз жазыңыз:", parse_mode="HTML")
-    await state.set_state(Form.fio)
+    await state.set_state(Form.p_fio)
     await cb.answer()
 
 
-@dp.message(Form.fio, F.text)
-async def on_fio(msg: Message, state: FSMContext):
-    await state.update_data(fio=msg.text.strip())
+@dp.message(Form.p_fio, F.text)
+async def on_p_fio(msg: Message, state: FSMContext):
     data = await state.get_data()
-    if data.get("foreign"):
-        await _ask_car_brand(msg, state)
+    idx = data.get("current_person", 0)
+    persons = _ensure_person(data.get("persons", []), idx)
+    persons[idx] = {**persons[idx], "fio": msg.text.strip()}
+    await state.update_data(persons=persons)
+    if persons[idx].get("foreign"):
+        await _next_person_or_car(msg, state)
     else:
         await msg.answer("<b>Класс</b>:", parse_mode="HTML", reply_markup=klass_keyboard())
-        await state.set_state(Form.klass)
+        await state.set_state(Form.p_klass)
 
 
-@dp.callback_query(Form.klass, F.data.startswith("kl:"))
-async def on_klass_choice(cb: CallbackQuery, state: FSMContext):
+@dp.callback_query(Form.p_klass, F.data.startswith("kl:"))
+async def on_p_klass_choice(cb: CallbackQuery, state: FSMContext):
     val = cb.data.split(":", 1)[1]
     klass = "" if val == "skip" else val
-    await state.update_data(klass=klass)
+    data = await state.get_data()
+    idx = data.get("current_person", 0)
+    persons = _ensure_person(data.get("persons", []), idx)
+    persons[idx] = {**persons[idx], "klass": klass}
+    await state.update_data(persons=persons)
     display = klass if klass else "бос"
     await cb.message.edit_text(f"Класс: <b>{h(display)}</b> ✅", parse_mode="HTML")
-    await _ask_car_brand(cb.message, state)
+    await _next_person_or_car(cb.message, state)
     await cb.answer()
 
 
-@dp.message(Form.klass, F.text)
-async def on_klass_text(msg: Message, state: FSMContext):
-    await state.update_data(klass=msg.text.strip())
-    await _ask_car_brand(msg, state)
+@dp.message(Form.p_klass, F.text)
+async def on_p_klass_text(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    idx = data.get("current_person", 0)
+    persons = _ensure_person(data.get("persons", []), idx)
+    persons[idx] = {**persons[idx], "klass": msg.text.strip()}
+    await state.update_data(persons=persons)
+    await _next_person_or_car(msg, state)
+
+
+async def _next_person_or_car(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    idx = data.get("current_person", 0)
+    n = data.get("people_count", 1)
+    if idx + 1 < n:
+        await state.update_data(current_person=idx + 1)
+        await _ask_iin(msg, state)
+    else:
+        await _ask_car_brand(msg, state)
 
 
 async def _ask_car_brand(msg: Message, state: FSMContext):
@@ -607,18 +690,24 @@ async def _show_final_summary(msg: Message, state: FSMContext):
         date_to=fmt_date(date_to),
     )
 
+    persons = data.get("persons", [])
+    persons_lines = []
+    for i, p in enumerate(persons):
+        persons_lines.append(
+            f"  <b>Адам {i + 1}:</b> {h(p.get('fio', ''))}\n"
+            f"     ИИН: <code>{h(p.get('iin') or '(бос)')}</code> | "
+            f"Класс: {h(p.get('klass') or '(бос)')}"
+        )
+    persons_text = "\n".join(persons_lines)
+
     dogovor_display = data.get("dogovor_no") or "(бос)"
-    klass_display = data.get("klass") or "(бос)"
-    iin_display = data.get("iin") or "(бос)"
     summary = (
         "<b>Барлық мәліметтер:</b>\n\n"
         f"<b>Компания:</b> {h(COMPANIES[data['company']])}\n"
         f"<b>Период:</b> {h(PERIODS[data['period']]['label'])}\n"
         f"<b>Сомасы:</b> {h(data['amount'])}\n"
-        f"<b>Договор №:</b> <code>{h(dogovor_display)}</code>\n"
-        f"<b>ФИО:</b> {h(data['fio'])}\n"
-        f"<b>ИИН:</b> <code>{h(iin_display)}</code>\n"
-        f"<b>Класс:</b> {h(klass_display)}\n"
+        f"<b>Договор №:</b> <code>{h(dogovor_display)}</code>\n\n"
+        f"<b>Адамдар ({data.get('people_count', 1)}):</b>\n{persons_text}\n\n"
         f"<b>Машина:</b> {h(data['car_brand'])}\n"
         f"<b>Гос. номер:</b> <code>{h(data['car_number'])}</code>\n"
         f"<b>VIN:</b> <code>{h(data['vin'])}</code>\n"
@@ -667,7 +756,9 @@ async def on_final_yes(cb: CallbackQuery, state: FSMContext):
     safe_no = re.sub(r"[^A-Za-z0-9_-]", "_", data.get("dogovor_no") or "empty")
     pdf_path = GENERATED_DIR / f"polis_{user_id}_{safe_no}.pdf"
 
-    fio_parts = (data.get("fio") or "").split()
+    persons = data.get("persons", [])
+    first_fio = (persons[0].get("fio", "") if persons else "")
+    fio_parts = first_fio.split()
     name = fio_parts[1] if len(fio_parts) >= 2 else (fio_parts[0] if fio_parts else "")
     filename_display = f"страховка {name}.pdf" if name else "страховка.pdf"
 

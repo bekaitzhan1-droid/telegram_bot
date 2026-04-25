@@ -150,6 +150,9 @@ function setup() {
       // 6) Class column in Insured Persons table
       _addClassPlaceholders(body, count);
 
+      // 7) Policyholder "Контактный телефон" cell — always blank
+      _clearPolicyholderPhone(body);
+
       doc.saveAndClose();
       log.push(`✅ ${count}-person OK (${docId})`);
     } catch (err) {
@@ -194,6 +197,48 @@ function _replaceLiteralOnce(body, literal, replacement) {
   const end = found.getEndOffsetInclusive();
   elem.deleteText(start, end);
   elem.insertText(start, replacement);
+}
+
+// Clear the "Контактный телефон" data cell in the Сақтанушы/Страхователь table.
+// Locates the table containing the header "Контактный телефон", finds the column
+// index of that header, then blanks the same column in every subsequent row.
+function _clearPolicyholderPhone(body) {
+  const tables = body.getTables();
+  for (const table of tables) {
+    if (table.getText().indexOf('Контактный телефон') < 0) continue;
+
+    const numRows = table.getNumRows();
+    let headerRow = -1;
+    let phoneCol = -1;
+    for (let r = 0; r < numRows && headerRow < 0; r++) {
+      const row = table.getRow(r);
+      const numCells = row.getNumCells();
+      for (let c = 0; c < numCells; c++) {
+        if (row.getCell(c).getText().indexOf('Контактный телефон') >= 0) {
+          headerRow = r;
+          phoneCol = c;
+          break;
+        }
+      }
+    }
+    if (headerRow < 0) continue;
+
+    for (let r = headerRow + 1; r < numRows; r++) {
+      const row = table.getRow(r);
+      if (phoneCol >= row.getNumCells()) continue;
+      const cell = row.getCell(phoneCol);
+      const numChildren = cell.getNumChildren();
+      for (let i = 0; i < numChildren; i++) {
+        const child = cell.getChild(i);
+        if (child.getType() === DocumentApp.ElementType.PARAGRAPH) {
+          const text = child.asParagraph().editAsText();
+          const len = text.getText().length;
+          if (len > 0) text.deleteText(0, len - 1);
+        }
+      }
+    }
+    return;
+  }
 }
 
 // In the Insured Persons table, set the class cell of each data row to {{klass_N}}.

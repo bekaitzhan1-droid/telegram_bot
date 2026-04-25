@@ -67,11 +67,10 @@ STANDARD_DOGOVOR_NO = "0656T160437N"
 
 DISCLAIMER = (
     "\n\n<i>⚠️ Документ предоставляется через авторизованного представителя "
-    "страховой компании «Номад Транзит» и предназначен исключительно для "
-    "личного использования держателем полиса. Передача документа третьим "
-    "лицам, перепродажа, изменение или иное использование запрещены. "
-    "Ответственность за нарушение указанных условий несёт пользователь "
-    "самостоятельно.</i>"
+    "страховой компании и предназначен исключительно для личного использования "
+    "держателем полиса. Передача документа третьим лицам, перепродажа, "
+    "изменение или иное использование запрещены. Ответственность за нарушение "
+    "указанных условий несёт пользователь самостоятельно.</i>"
 )
 
 
@@ -267,20 +266,28 @@ async def start_new_polis(msg: Message, state: FSMContext):
     await state.set_state(Form.people_count)
 
 
+DEFAULT_COMPANY = next(iter(COMPANIES))  # single-company mode: skip selection step
+
+
 @dp.callback_query(Form.people_count, F.data.startswith("pc:"))
 async def on_people_count(cb: CallbackQuery, state: FSMContext):
     n = int(cb.data.split(":", 1)[1])
     if not (1 <= n <= 5):
         await cb.answer("Ошибка", show_alert=True)
         return
-    await state.update_data(people_count=n, persons=[], current_person=0)
+    await state.update_data(
+        people_count=n,
+        persons=[],
+        current_person=0,
+        company=DEFAULT_COMPANY,
+    )
     await cb.message.edit_text(f"Кол-во застрахованных: <b>{n}</b> ✅", parse_mode="HTML")
     await cb.message.answer(
-        "<b>Выберите страховую компанию:</b>",
+        "<b>Срок действия полиса:</b>",
         parse_mode="HTML",
-        reply_markup=company_keyboard(),
+        reply_markup=period_keyboard(),
     )
-    await state.set_state(Form.company)
+    await state.set_state(Form.period)
     await cb.answer()
 
 

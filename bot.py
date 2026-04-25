@@ -232,11 +232,34 @@ def final_confirm_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def tos_keyboard() -> InlineKeyboardMarkup:
+def tos_short_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Согласен", callback_data="tos:yes")],
+        [InlineKeyboardButton(text="📄 Подробнее", callback_data="tos:more")],
+    ])
+
+
+def tos_full_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Согласен — принимаю условия", callback_data="tos:yes")],
         [InlineKeyboardButton(text="❌ Не согласен", callback_data="tos:no")],
     ])
+
+
+def tos_short_text() -> str:
+    bonus_line = ""
+    if WELCOME_BONUS > 0:
+        bonus_line = (
+            f"\n🎁 После принятия условий вы получите приветственный бонус "
+            f"<b>+{fmt_money(WELCOME_BONUS)}</b> на счёт.\n"
+        )
+    return (
+        "👋 <b>Добро пожаловать!</b>\n\n"
+        "Это сервис для быстрого оформления страховых полисов.\n"
+        + bonus_line +
+        "\nНажмите <b>«✅ Согласен»</b> чтобы продолжить, "
+        "или <b>«📄 Подробнее»</b> — чтобы прочитать условия использования."
+    )
 
 
 def people_count_keyboard() -> InlineKeyboardMarkup:
@@ -275,7 +298,7 @@ async def show_welcome(msg: Message, state: FSMContext):
     await state.clear()
     await ensure_user(msg.from_user.id, msg.from_user.username, msg.from_user.first_name)
     if not await is_tos_accepted(msg.from_user.id):
-        await msg.answer(TOS_TEXT, parse_mode="HTML", reply_markup=tos_keyboard())
+        await msg.answer(tos_short_text(), parse_mode="HTML", reply_markup=tos_short_keyboard())
         return
     await _send_main_greeting(msg, msg.from_user.first_name, msg.from_user.id)
 
@@ -300,7 +323,7 @@ async def start_new_polis(msg: Message, state: FSMContext):
     await state.clear()
     await ensure_user(msg.from_user.id, msg.from_user.username, msg.from_user.first_name)
     if not await is_tos_accepted(msg.from_user.id):
-        await msg.answer(TOS_TEXT, parse_mode="HTML", reply_markup=tos_keyboard())
+        await msg.answer(tos_short_text(), parse_mode="HTML", reply_markup=tos_short_keyboard())
         return
     if not is_admin(msg.from_user.id):
         balance = await get_balance(msg.from_user.id)
@@ -350,6 +373,16 @@ async def on_people_count(cb: CallbackQuery, state: FSMContext):
 @dp.message(CommandStart())
 async def start(msg: Message, state: FSMContext):
     await show_welcome(msg, state)
+
+
+@dp.callback_query(F.data == "tos:more")
+async def on_tos_more(cb: CallbackQuery):
+    await cb.message.edit_text(
+        TOS_TEXT,
+        parse_mode="HTML",
+        reply_markup=tos_full_keyboard(),
+    )
+    await cb.answer()
 
 
 @dp.callback_query(F.data == "tos:yes")

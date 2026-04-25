@@ -199,45 +199,68 @@ function _replaceLiteralOnce(body, literal, replacement) {
   elem.insertText(start, replacement);
 }
 
-// Clear the "Контактный телефон" data cell in the Сақтанушы/Страхователь table.
-// Locates the table containing the header "Контактный телефон", finds the column
-// index of that header, then blanks the same column in every subsequent row.
+// Clear the "Контактный телефон" data in every Сақтанушы/Страхователь table.
+// Strategy: (a) find header column index → blank that column in non-header rows;
+//           (b) fallback — across ALL cells in non-header rows, blank any
+//               paragraph whose text matches a phone-like pattern (catches the
+//               case where the phone cell is merged into the IIN cell).
 function _clearPolicyholderPhone(body) {
   const tables = body.getTables();
   for (const table of tables) {
     if (table.getText().indexOf('Контактный телефон') < 0) continue;
 
     const numRows = table.getNumRows();
-    let headerRow = -1;
-    let phoneCol = -1;
-    for (let r = 0; r < numRows && headerRow < 0; r++) {
+    let phoneCol = -1, headerRow = -1;
+    for (let r = 0; r < numRows && phoneCol < 0; r++) {
+      const row = table.getRow(r);
+      for (let c = 0; c < row.getNumCells(); c++) {
+        if (row.getCell(c).getText().indexOf('Контактный телефон') >= 0) {
+          phoneCol = c; headerRow = r; break;
+        }
+      }
+    }
+    if (phoneCol < 0) continue;
+
+    for (let r = 0; r < numRows; r++) {
+      if (r === headerRow) continue;
       const row = table.getRow(r);
       const numCells = row.getNumCells();
+      // (a) Column-based clear
+      if (phoneCol < numCells) _clearCellContent(row.getCell(phoneCol));
+      // (b) Paragraph-level fallback in every cell of this row
       for (let c = 0; c < numCells; c++) {
-        if (row.getCell(c).getText().indexOf('Контактный телефон') >= 0) {
-          headerRow = r;
-          phoneCol = c;
-          break;
-        }
+        _clearPhoneParagraphs(row.getCell(c));
       }
     }
-    if (headerRow < 0) continue;
+  }
+}
 
-    for (let r = headerRow + 1; r < numRows; r++) {
-      const row = table.getRow(r);
-      if (phoneCol >= row.getNumCells()) continue;
-      const cell = row.getCell(phoneCol);
-      const numChildren = cell.getNumChildren();
-      for (let i = 0; i < numChildren; i++) {
-        const child = cell.getChild(i);
-        if (child.getType() === DocumentApp.ElementType.PARAGRAPH) {
-          const text = child.asParagraph().editAsText();
-          const len = text.getText().length;
-          if (len > 0) text.deleteText(0, len - 1);
-        }
-      }
+function _clearCellContent(cell) {
+  const n = cell.getNumChildren();
+  for (let i = 0; i < n; i++) {
+    const child = cell.getChild(i);
+    if (child.getType() === DocumentApp.ElementType.PARAGRAPH) {
+      const t = child.asParagraph().editAsText();
+      const len = t.getText().length;
+      if (len > 0) t.deleteText(0, len - 1);
     }
-    return;
+  }
+}
+
+// Blank any paragraph whose text is a phone-like pattern.
+// Matches: "7", "+7", "+7 ...", "+7(...", "+7-...", "8 ...", "8(...", "8-..."
+// Does NOT match a 12-digit IIN like "730101399496" (no separator after first char).
+function _clearPhoneParagraphs(cell) {
+  const n = cell.getNumChildren();
+  for (let i = 0; i < n; i++) {
+    const child = cell.getChild(i);
+    if (child.getType() !== DocumentApp.ElementType.PARAGRAPH) continue;
+    const txt = child.asParagraph().getText().trim();
+    if (txt === '7' || txt === '+7' || /^(\+7|8)\s*[\(\-]/.test(txt)) {
+      const t = child.asParagraph().editAsText();
+      const len = t.getText().length;
+      if (len > 0) t.deleteText(0, len - 1);
+    }
   }
 }
 

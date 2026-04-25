@@ -26,6 +26,23 @@ def _url_for(people_count: int) -> str:
     # Fall back to URL_1 if specific count URL not set
     return APPS_SCRIPT_URLS.get(1, "")
 
+
+def _redact(url: str) -> str:
+    if not url:
+        return "(empty)"
+    # Show only deployment ID prefix + suffix to identify which URL is loaded
+    if "/macros/s/" in url:
+        head, _, tail = url.partition("/macros/s/")
+        return head + "/macros/s/" + tail[:14] + "..." + tail[-12:]
+    return url[:30] + "..."
+
+
+import logging as _log
+_log.getLogger().info(
+    "PDF config: " + ", ".join(f"URL_{n}={_redact(u)}" for n, u in APPS_SCRIPT_URLS.items() if u) +
+    f", TOKEN={'set' if APPS_SCRIPT_TOKEN else 'MISSING'}"
+)
+
 _ssl_ctx = ssl.create_default_context(cafile=certifi.where())
 
 PDF_FIELDS = (

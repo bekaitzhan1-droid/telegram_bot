@@ -109,7 +109,7 @@ def compute_period(period_key: str, dogovor_date: date) -> tuple[date, date]:
 
 def format_amount_ru(n: int) -> str:
     words = num2words(n, lang="ru")
-    return f"{n:,},00 {words} тенге 00 тиын"
+    return f"{n:,},00 {words} тенге 00 тиын".upper()
 
 
 dp = Dispatcher(storage=MemoryStorage())
@@ -491,7 +491,7 @@ async def on_dogovor_manual(cb: CallbackQuery, state: FSMContext):
 
 @dp.message(Form.dogovor_manual, F.text)
 async def on_dogovor_manual_input(msg: Message, state: FSMContext):
-    await state.update_data(dogovor_no=msg.text.strip())
+    await state.update_data(dogovor_no=msg.text.strip().upper())
     await _ask_iin(msg, state)
 
 
@@ -588,8 +588,8 @@ async def on_p_iin_confirm_yes(cb: CallbackQuery, state: FSMContext):
     persons = _ensure_person(data.get("persons", []), idx)
     persons[idx] = {
         **persons[idx],
-        "fio": data.get("nsk_fio", ""),
-        "klass": data.get("nsk_class", ""),
+        "fio": data.get("nsk_fio", "").upper(),
+        "klass": data.get("nsk_class", "").upper(),
     }
     await state.update_data(persons=persons)
     await cb.message.edit_reply_markup(reply_markup=None)
@@ -610,7 +610,7 @@ async def on_p_fio(msg: Message, state: FSMContext):
     data = await state.get_data()
     idx = data.get("current_person", 0)
     persons = _ensure_person(data.get("persons", []), idx)
-    persons[idx] = {**persons[idx], "fio": msg.text.strip()}
+    persons[idx] = {**persons[idx], "fio": msg.text.strip().upper()}
     await state.update_data(persons=persons)
     if persons[idx].get("foreign"):
         await _next_person_or_car(msg, state)
@@ -639,7 +639,7 @@ async def on_p_klass_text(msg: Message, state: FSMContext):
     data = await state.get_data()
     idx = data.get("current_person", 0)
     persons = _ensure_person(data.get("persons", []), idx)
-    persons[idx] = {**persons[idx], "klass": msg.text.strip()}
+    persons[idx] = {**persons[idx], "klass": msg.text.strip().upper()}
     await state.update_data(persons=persons)
     await _next_person_or_car(msg, state)
 
@@ -662,21 +662,21 @@ async def _ask_car_brand(msg: Message, state: FSMContext):
 
 @dp.message(Form.car_brand, F.text)
 async def on_brand(msg: Message, state: FSMContext):
-    await state.update_data(car_brand=msg.text.strip())
+    await state.update_data(car_brand=msg.text.strip().upper())
     await msg.answer("<b>Гос. номер</b>:", parse_mode="HTML")
     await state.set_state(Form.car_number)
 
 
 @dp.message(Form.car_number, F.text)
 async def on_car_number(msg: Message, state: FSMContext):
-    await state.update_data(car_number=msg.text.strip())
+    await state.update_data(car_number=msg.text.strip().upper())
     await msg.answer("<b>VIN</b>:", parse_mode="HTML")
     await state.set_state(Form.vin)
 
 
 @dp.message(Form.vin, F.text)
 async def on_vin(msg: Message, state: FSMContext):
-    await state.update_data(vin=msg.text.strip())
+    await state.update_data(vin=msg.text.strip().upper())
     await _show_final_summary(msg, state)
 
 

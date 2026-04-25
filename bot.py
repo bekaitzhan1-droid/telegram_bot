@@ -77,6 +77,7 @@ class Form(StatesGroup):
     p_iin_choice = State()
     p_iin_input = State()
     p_iin_confirm = State()
+    p_iin_not_found = State()
     p_fio = State()
     p_klass = State()
     car_brand = State()
@@ -109,7 +110,7 @@ def compute_period(period_key: str, dogovor_date: date) -> tuple[date, date]:
 
 def format_amount_ru(n: int) -> str:
     words = num2words(n, lang="ru")
-    return f"{n:,},00 {words} тенге 00 тиын".upper()
+    return f"{n:,},00 {words} тенге 00 тиын"
 
 
 dp = Dispatcher(storage=MemoryStorage())
@@ -158,6 +159,14 @@ def iin_confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Иә, дұрыс", callback_data="ic:yes")],
         [InlineKeyboardButton(text="❌ Жоқ, қолмен жазамын", callback_data="ic:no")],
+    ])
+
+
+def iin_not_found_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Қайта іздеу", callback_data="nf:retry")],
+        [InlineKeyboardButton(text="✏️ ИИН өзгерту", callback_data="nf:change")],
+        [InlineKeyboardButton(text="📝 ФИО өзім жазамын", callback_data="nf:fio")],
     ])
 
 
@@ -548,9 +557,7 @@ async def on_p_iin_foreign(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
-@dp.message(Form.p_iin_input, F.text)
-async def on_p_iin_input(msg: Message, state: FSMContext):
-    iin = msg.text.strip()
+async def _do_iin_search(msg: Message, state: FSMContext, iin: str):
     data = await state.get_data()
     idx = data.get("current_person", 0)
     persons = _ensure_person(data.get("persons", []), idx)
@@ -576,10 +583,48 @@ async def on_p_iin_input(msg: Message, state: FSMContext):
         await state.set_state(Form.p_iin_confirm)
     else:
         await msg.answer(
-            "Табылмады. <b>ФИО</b> өзіңіз жазыңыз:",
+            f"❌ ИИН <code>{h(iin)}</code> бойынша табылмады.\n\nҚалай жалғастырамыз?",
             parse_mode="HTML",
+            reply_markup=iin_not_found_keyboard(),
         )
-        await state.set_state(Form.p_fio)
+        await state.set_state(Form.p_iin_not_found)
+
+
+@dp.message(Form.p_iin_input, F.text)
+async def on_p_iin_input(msg: Message, state: FSMContext):
+    iin = msg.text.strip()
+    await _do_iin_search(msg, state, iin)
+
+
+@dp.callback_query(Form.p_iin_not_found, F.data == "nf:retry")
+async def on_iin_nf_retry(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    idx = data.get("current_person", 0)
+    persons = data.get("persons", [])
+    iin = persons[idx].get("iin", "") if idx < len(persons) else ""
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.answer()
+    if not iin:
+        await cb.message.answer("<b>ИИН жазыңыз</b>:", parse_mode="HTML")
+        await state.set_state(Form.p_iin_input)
+        return
+    await _do_iin_search(cb.message, state, iin)
+
+
+@dp.callback_query(Form.p_iin_not_found, F.data == "nf:change")
+async def on_iin_nf_change(cb: CallbackQuery, state: FSMContext):
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.message.answer("<b>ИИН-ді қайта жазыңыз</b>:", parse_mode="HTML")
+    await state.set_state(Form.p_iin_input)
+    await cb.answer()
+
+
+@dp.callback_query(Form.p_iin_not_found, F.data == "nf:fio")
+async def on_iin_nf_fio(cb: CallbackQuery, state: FSMContext):
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.message.answer("<b>ФИО</b> өзіңіз жазыңыз:", parse_mode="HTML")
+    await state.set_state(Form.p_fio)
+    await cb.answer()
 
 
 @dp.callback_query(Form.p_iin_confirm, F.data == "ic:yes")

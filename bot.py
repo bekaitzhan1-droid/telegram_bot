@@ -5,7 +5,7 @@ import logging
 import os
 import re
 import secrets
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from html import escape as h
 from pathlib import Path
 
@@ -117,6 +117,10 @@ class Form(StatesGroup):
     people_count = State()
     company = State()
     period = State()
+    dates_confirm = State()
+    dogovor_date_input = State()
+    date_from_input = State()
+    date_to_input = State()
     sum_input = State()
     sum_confirm = State()
     dogovor_choice = State()
@@ -135,6 +139,14 @@ class Form(StatesGroup):
 
 def fmt_date(d: date) -> str:
     return d.strftime("%d.%m.%Y")
+
+
+def parse_date(s: str) -> date | None:
+    s = s.strip().replace("/", ".").replace("-", ".")
+    try:
+        return datetime.strptime(s, "%d.%m.%Y").date()
+    except ValueError:
+        return None
 
 
 def add_months(d: date, months: int) -> date:
@@ -171,8 +183,8 @@ def company_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def period_keyboard() -> InlineKeyboardMarkup:
-    keys = list(PERIODS.keys())
+def period_keyboard(admin: bool = False) -> InlineKeyboardMarkup:
+    keys = list(PERIODS.keys()) if admin else ["10d"]
     rows = [
         [InlineKeyboardButton(text=PERIODS[k]["label"], callback_data=f"pe:{k}") for k in keys[i:i + 2]]
         for i in range(0, len(keys), 2)
@@ -184,6 +196,13 @@ def sum_confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Верно", callback_data="sum:yes")],
         [InlineKeyboardButton(text="✏️ Изменить", callback_data="sum:no")],
+    ])
+
+
+def dates_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить", callback_data="dt:yes")],
+        [InlineKeyboardButton(text="✏️ Ввести вручную", callback_data="dt:no")],
     ])
 
 
@@ -364,7 +383,7 @@ async def on_people_count(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer(
         "<b>Срок действия полиса:</b>",
         parse_mode="HTML",
-        reply_markup=period_keyboard(),
+        reply_markup=period_keyboard(admin=is_admin(cb.from_user.id)),
     )
     await state.set_state(Form.period)
     await cb.answer()
@@ -630,7 +649,7 @@ async def on_company(cb: CallbackQuery, state: FSMContext):
         return
     await state.update_data(company=key)
     await cb.message.edit_text(f"Компания: <b>{h(COMPANIES[key])}</b> ✅", parse_mode="HTML")
-    await cb.message.answer("<b>Срок действия полиса:</b>", parse_mode="HTML", reply_markup=period_keyboard())
+    await cb.message.answer("<b>Срок действия полиса:</b>", parse_mode="HTML", reply_markup=period_keyboard(admin=is_admin(cb.from_user.id)))
     await state.set_state(Form.period)
     await cb.answer()
 
@@ -641,8 +660,34 @@ async def on_period(cb: CallbackQuery, state: FSMContext):
     if key not in PERIODS:
         await cb.answer("Ошибка", show_alert=True)
         return
+    admin = is_admin(cb.from_user.id)
+    if not admin and key != "10d":
+        await cb.answer("Доступен только срок 10 дней", show_alert=True)
+        return
     await state.update_data(period=key)
     await cb.message.edit_text(f"Срок: <b>{h(PERIODS[key]['label'])}</b> ✅", parse_mode="HTML")
+
+    if admin:
+        dogovor_date = date.today()
+        date_from, date_to = compute_period(key, dogovor_date)
+        await state.update_data(
+            dogovor_date=fmt_date(dogovor_date),
+            date_from=fmt_date(date_from),
+            date_to=fmt_date(date_to),
+        )
+        await cb.message.answer(
+            "<b>Авторасчёт дат:</b>\n\n"
+            f"<b>Дата договора:</b> {fmt_date(dogovor_date)}\n"
+            f"<b>Срок от:</b> {fmt_date(date_from)}\n"
+            f"<b>Срок до:</b> {fmt_date(date_to)}\n\n"
+            "Подтвердить или ввести вручную?",
+            parse_mode="HTML",
+            reply_markup=dates_confirm_keyboard(),
+        )
+        await state.set_state(Form.dates_confirm)
+        await cb.answer()
+        return
+
     await cb.message.answer(
         "<b>Введите сумму страховки в тенге.</b>\n"
         "Например: <code>15000</code>",
@@ -650,6 +695,79 @@ async def on_period(cb: CallbackQuery, state: FSMContext):
     )
     await state.set_state(Form.sum_input)
     await cb.answer()
+
+
+async def _ask_sum(target: Message, state: FSMContext):
+    await target.answer(
+        "<b>Введите сумму страховки в тенге.</b>\n"
+        "Например: <code>15000</code>",
+        parse_mode="HTML",
+    )
+    await state.set_state(Form.sum_input)
+
+
+@dp.callback_query(Form.dates_confirm, F.data == "dt:yes")
+async def on_dates_yes(cb: CallbackQuery, state: FSMContext):
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await _ask_sum(cb.message, state)
+    await cb.answer()
+
+
+@dp.callback_query(Form.dates_confirm, F.data == "dt:no")
+async def on_dates_no(cb: CallbackQuery, state: FSMContext):
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.message.answer(
+        "<b>Дата договора</b> (формат <code>ДД.ММ.ГГГГ</code>):",
+        parse_mode="HTML",
+    )
+    await state.set_state(Form.dogovor_date_input)
+    await cb.answer()
+
+
+@dp.message(Form.dogovor_date_input, F.text)
+async def on_dogovor_date_input(msg: Message, state: FSMContext):
+    d = parse_date(msg.text)
+    if not d:
+        await msg.answer("Неверный формат. Введите как <code>05.05.2026</code>:", parse_mode="HTML")
+        return
+    await state.update_data(dogovor_date=fmt_date(d))
+    await msg.answer(
+        "<b>Срок от</b> (формат <code>ДД.ММ.ГГГГ</code>):",
+        parse_mode="HTML",
+    )
+    await state.set_state(Form.date_from_input)
+
+
+@dp.message(Form.date_from_input, F.text)
+async def on_date_from_input(msg: Message, state: FSMContext):
+    d = parse_date(msg.text)
+    if not d:
+        await msg.answer("Неверный формат. Введите как <code>06.05.2026</code>:", parse_mode="HTML")
+        return
+    await state.update_data(date_from=fmt_date(d))
+    await msg.answer(
+        "<b>Срок до</b> (формат <code>ДД.ММ.ГГГГ</code>):",
+        parse_mode="HTML",
+    )
+    await state.set_state(Form.date_to_input)
+
+
+@dp.message(Form.date_to_input, F.text)
+async def on_date_to_input(msg: Message, state: FSMContext):
+    d = parse_date(msg.text)
+    if not d:
+        await msg.answer("Неверный формат. Введите как <code>06.05.2027</code>:", parse_mode="HTML")
+        return
+    await state.update_data(date_to=fmt_date(d))
+    data = await state.get_data()
+    await msg.answer(
+        "<b>Даты сохранены:</b>\n\n"
+        f"<b>Дата договора:</b> {h(data.get('dogovor_date', ''))}\n"
+        f"<b>Срок от:</b> {h(data.get('date_from', ''))}\n"
+        f"<b>Срок до:</b> {h(data.get('date_to', ''))}",
+        parse_mode="HTML",
+    )
+    await _ask_sum(msg, state)
 
 
 @dp.message(Form.sum_input, F.text)
@@ -937,13 +1055,21 @@ async def on_vin(msg: Message, state: FSMContext):
 
 async def _show_final_summary(msg: Message, state: FSMContext):
     data = await state.get_data()
-    dogovor_date = date.today()
-    date_from, date_to = compute_period(data["period"], dogovor_date)
-    await state.update_data(
-        dogovor_date=fmt_date(dogovor_date),
-        date_from=fmt_date(date_from),
-        date_to=fmt_date(date_to),
-    )
+    if data.get("dogovor_date") and data.get("date_from") and data.get("date_to"):
+        dogovor_date_str = data["dogovor_date"]
+        date_from_str = data["date_from"]
+        date_to_str = data["date_to"]
+    else:
+        dogovor_date = date.today()
+        date_from, date_to = compute_period(data["period"], dogovor_date)
+        dogovor_date_str = fmt_date(dogovor_date)
+        date_from_str = fmt_date(date_from)
+        date_to_str = fmt_date(date_to)
+        await state.update_data(
+            dogovor_date=dogovor_date_str,
+            date_from=date_from_str,
+            date_to=date_to_str,
+        )
 
     persons = data.get("persons", [])
     persons_lines = []
@@ -966,8 +1092,8 @@ async def _show_final_summary(msg: Message, state: FSMContext):
         f"<b>Авто:</b> {h(data['car_brand'])}\n"
         f"<b>Гос. номер:</b> <code>{h(data['car_number'])}</code>\n"
         f"<b>VIN:</b> <code>{h(data['vin'])}</code>\n"
-        f"<b>Дата договора:</b> {fmt_date(dogovor_date)}\n"
-        f"<b>Период действия:</b> {fmt_date(date_from)} — {fmt_date(date_to)}"
+        f"<b>Дата договора:</b> {h(dogovor_date_str)}\n"
+        f"<b>Период действия:</b> {h(date_from_str)} — {h(date_to_str)}"
     )
     await msg.answer(summary, parse_mode="HTML", reply_markup=final_confirm_keyboard())
     await state.set_state(Form.final_confirm)

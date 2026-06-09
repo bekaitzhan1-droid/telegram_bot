@@ -51,7 +51,7 @@ from db import (
     log_polis,
     set_tos_accepted,
 )
-from nsk import fetch_bonus_malus
+from bonus_malus import fetch_bonus_malus
 from pdf import PdfError, generate_pdf
 
 GENERATED_DIR = Path(__file__).parent / "generated"
@@ -183,8 +183,8 @@ def company_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def period_keyboard(admin: bool = False) -> InlineKeyboardMarkup:
-    keys = list(PERIODS.keys()) if admin else ["10d"]
+def period_keyboard() -> InlineKeyboardMarkup:
+    keys = list(PERIODS.keys())
     rows = [
         [InlineKeyboardButton(text=PERIODS[k]["label"], callback_data=f"pe:{k}") for k in keys[i:i + 2]]
         for i in range(0, len(keys), 2)
@@ -383,7 +383,7 @@ async def on_people_count(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer(
         "<b>Срок действия полиса:</b>",
         parse_mode="HTML",
-        reply_markup=period_keyboard(admin=is_admin(cb.from_user.id)),
+        reply_markup=period_keyboard(),
     )
     await state.set_state(Form.period)
     await cb.answer()
@@ -649,7 +649,7 @@ async def on_company(cb: CallbackQuery, state: FSMContext):
         return
     await state.update_data(company=key)
     await cb.message.edit_text(f"Компания: <b>{h(COMPANIES[key])}</b> ✅", parse_mode="HTML")
-    await cb.message.answer("<b>Срок действия полиса:</b>", parse_mode="HTML", reply_markup=period_keyboard(admin=is_admin(cb.from_user.id)))
+    await cb.message.answer("<b>Срок действия полиса:</b>", parse_mode="HTML", reply_markup=period_keyboard())
     await state.set_state(Form.period)
     await cb.answer()
 
@@ -660,44 +660,45 @@ async def on_period(cb: CallbackQuery, state: FSMContext):
     if key not in PERIODS:
         await cb.answer("Ошибка", show_alert=True)
         return
-    admin = is_admin(cb.from_user.id)
-    if not admin and key != "10d":
-        await cb.answer("Доступен только срок 10 дней", show_alert=True)
-        return
     await state.update_data(period=key)
     await cb.message.edit_text(f"Срок: <b>{h(PERIODS[key]['label'])}</b> ✅", parse_mode="HTML")
 
-    if admin:
-        dogovor_date = date.today()
-        date_from, date_to = compute_period(key, dogovor_date)
-        await state.update_data(
-            dogovor_date=fmt_date(dogovor_date),
-            date_from=fmt_date(date_from),
-            date_to=fmt_date(date_to),
-        )
-        await cb.message.answer(
-            "<b>Авторасчёт дат:</b>\n\n"
-            f"<b>Дата договора:</b> {fmt_date(dogovor_date)}\n"
-            f"<b>Срок от:</b> {fmt_date(date_from)}\n"
-            f"<b>Срок до:</b> {fmt_date(date_to)}\n\n"
-            "Подтвердить или ввести вручную?",
-            parse_mode="HTML",
-            reply_markup=dates_confirm_keyboard(),
-        )
-        await state.set_state(Form.dates_confirm)
-        await cb.answer()
-        return
-
-    await cb.message.answer(
-        "<b>Введите сумму страховки в тенге.</b>\n"
-        "Например: <code>15000</code>",
-        parse_mode="HTML",
+    dogovor_date = date.today()
+    date_from, date_to = compute_period(key, dogovor_date)
+    await state.update_data(
+        dogovor_date=fmt_date(dogovor_date),
+        date_from=fmt_date(date_from),
+        date_to=fmt_date(date_to),
     )
-    await state.set_state(Form.sum_input)
+    await cb.message.answer(
+        "<b>Авторасчёт дат:</b>\n\n"
+        f"<b>Дата договора:</b> {fmt_date(dogovor_date)}\n"
+        f"<b>Срок от:</b> {fmt_date(date_from)}\n"
+        f"<b>Срок до:</b> {fmt_date(date_to)}\n\n"
+        "Подтвердить или ввести вручную?",
+        parse_mode="HTML",
+        reply_markup=dates_confirm_keyboard(),
+    )
+    await state.set_state(Form.dates_confirm)
     await cb.answer()
 
 
 async def _ask_sum(target: Message, state: FSMContext):
+    data = await state.get_data()
+    if data.get("period") == "10d":
+        formatted = format_amount_ru(15000)
+        await state.update_data(amount=formatted)
+        await target.answer(
+            f"<b>Сумма (авто):</b> <code>{h(formatted)}</code>",
+            parse_mode="HTML",
+        )
+        await target.answer(
+            "<b>Номер договора</b> — как заполнить?",
+            parse_mode="HTML",
+            reply_markup=dogovor_keyboard(),
+        )
+        await state.set_state(Form.dogovor_choice)
+        return
     await target.answer(
         "<b>Введите сумму страховки в тенге.</b>\n"
         "Например: <code>15000</code>",
@@ -898,7 +899,7 @@ async def _do_iin_search(msg: Message, state: FSMContext, iin: str):
     except Exception:
         pass
     if result:
-        await state.update_data(nsk_fio=result["full_name"], nsk_class=result["class"])
+        await state.update_data(iin_fio=result["full_name"], iin_class=result["class"])
         await msg.answer(
             f"Найдено:\n\n"
             f"<b>ФИО:</b> {h(result['full_name'])}\n"
@@ -961,8 +962,8 @@ async def on_p_iin_confirm_yes(cb: CallbackQuery, state: FSMContext):
     persons = _ensure_person(data.get("persons", []), idx)
     persons[idx] = {
         **persons[idx],
-        "fio": data.get("nsk_fio", "").upper(),
-        "klass": data.get("nsk_class", "").upper(),
+        "fio": data.get("iin_fio", "").upper(),
+        "klass": data.get("iin_class", "").upper(),
     }
     await state.update_data(persons=persons)
     await cb.message.edit_reply_markup(reply_markup=None)

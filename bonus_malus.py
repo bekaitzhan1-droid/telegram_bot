@@ -3,14 +3,14 @@ import ssl
 import aiohttp
 import certifi
 
-NSK_URL = "https://new.nsk.kz/api/bonus-malus/{iin}"
+API_URL = "https://www.nsk.kz/api/bonus-malus/{iin}"
 
 _ssl_ctx = ssl.create_default_context(cafile=certifi.where())
 
 
 async def fetch_bonus_malus(iin: str) -> dict | None:
     """Return {'full_name': str, 'class': str} or None if not found / error."""
-    url = NSK_URL.format(iin=iin)
+    url = API_URL.format(iin=iin)
     connector = aiohttp.TCPConnector(ssl=_ssl_ctx)
     timeout = aiohttp.ClientTimeout(total=10)
     try:

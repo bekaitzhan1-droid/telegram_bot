@@ -34,6 +34,8 @@ from aiogram.types import (
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    WebAppInfo,
 )
 from num2words import num2words
 
@@ -51,6 +53,8 @@ from db import (
     log_polis,
     set_tos_accepted,
 )
+import bonus_malus
+import webapp
 from bonus_malus import fetch_bonus_malus
 from pdf import PdfError, generate_pdf
 
@@ -135,6 +139,8 @@ class Form(StatesGroup):
     car_number = State()
     vin = State()
     final_confirm = State()
+    error_retry = State()
+    edit_menu = State()
 
 
 def fmt_date(d: date) -> str:
@@ -247,7 +253,27 @@ def klass_keyboard() -> InlineKeyboardMarkup:
 def final_confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Подтвердить — создать документ", callback_data="fin:yes")],
+        [InlineKeyboardButton(text="✏️ Изменить данные", callback_data="fin:edit")],
         [InlineKeyboardButton(text="🔄 Начать заново", callback_data="fin:restart")],
+    ])
+
+
+def error_retry_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Повторить", callback_data="er:retry")],
+        [InlineKeyboardButton(text="✏️ Изменить данные", callback_data="er:edit")],
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="er:cancel")],
+    ])
+
+
+def edit_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Сумма", callback_data="ed:sum"),
+         InlineKeyboardButton(text="📅 Даты", callback_data="ed:dates")],
+        [InlineKeyboardButton(text="📄 № договора", callback_data="ed:dogovor"),
+         InlineKeyboardButton(text="🚗 Авто", callback_data="ed:car")],
+        [InlineKeyboardButton(text="👤 Застрахованные", callback_data="ed:persons")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="ed:back")],
     ])
 
 
@@ -683,6 +709,15 @@ async def on_period(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
+async def _after_edit(target: Message, state: FSMContext) -> bool:
+    """If we're editing one field, jump straight back to the summary."""
+    data = await state.get_data()
+    if not data.get("edit_mode"):
+        return False
+    await _show_final_summary(target, state)
+    return True
+
+
 async def _ask_sum(target: Message, state: FSMContext):
     data = await state.get_data()
     if data.get("period") == "10d":
@@ -768,6 +803,8 @@ async def on_date_to_input(msg: Message, state: FSMContext):
         f"<b>Срок до:</b> {h(data.get('date_to', ''))}",
         parse_mode="HTML",
     )
+    if await _after_edit(msg, state):
+        return
     await _ask_sum(msg, state)
 
 
@@ -798,25 +835,31 @@ async def on_sum_no(cb: CallbackQuery, state: FSMContext):
 @dp.callback_query(Form.sum_confirm, F.data == "sum:yes")
 async def on_sum_yes(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.answer()
+    if await _after_edit(cb.message, state):
+        return
     await cb.message.answer("<b>Номер договора</b> — как заполнить?", parse_mode="HTML", reply_markup=dogovor_keyboard())
     await state.set_state(Form.dogovor_choice)
-    await cb.answer()
 
 
 @dp.callback_query(Form.dogovor_choice, F.data == "do:std")
 async def on_dogovor_std(cb: CallbackQuery, state: FSMContext):
     await state.update_data(dogovor_no=STANDARD_DOGOVOR_NO)
     await cb.message.edit_text(f"Номер договора: <code>{STANDARD_DOGOVOR_NO}</code> ✅", parse_mode="HTML")
-    await _ask_iin(cb.message, state)
     await cb.answer()
+    if await _after_edit(cb.message, state):
+        return
+    await _ask_iin(cb.message, state)
 
 
 @dp.callback_query(Form.dogovor_choice, F.data == "do:none")
 async def on_dogovor_none(cb: CallbackQuery, state: FSMContext):
     await state.update_data(dogovor_no="")
     await cb.message.edit_text("Номер договора: <i>пусто</i> ✅", parse_mode="HTML")
-    await _ask_iin(cb.message, state)
     await cb.answer()
+    if await _after_edit(cb.message, state):
+        return
+    await _ask_iin(cb.message, state)
 
 
 @dp.callback_query(Form.dogovor_choice, F.data == "do:man")
@@ -830,6 +873,8 @@ async def on_dogovor_manual(cb: CallbackQuery, state: FSMContext):
 @dp.message(Form.dogovor_manual, F.text)
 async def on_dogovor_manual_input(msg: Message, state: FSMContext):
     await state.update_data(dogovor_no=msg.text.strip().upper())
+    if await _after_edit(msg, state):
+        return
     await _ask_iin(msg, state)
 
 
@@ -910,12 +955,44 @@ async def _do_iin_search(msg: Message, state: FSMContext, iin: str):
         )
         await state.set_state(Form.p_iin_confirm)
     else:
+        await _offer_captcha(msg, state, iin)
         await msg.answer(
             f"❌ По ИИН <code>{h(iin)}</code> ничего не найдено.\n\nКак продолжим?",
             parse_mode="HTML",
             reply_markup=iin_not_found_keyboard(),
         )
         await state.set_state(Form.p_iin_not_found)
+
+
+async def _offer_captcha(msg: Message, state: FSMContext, iin: str):
+    """Eurasia missed and NSK needs a human-solved captcha — offer the WebApp."""
+    if bonus_malus.solver_configured() or bonus_malus.has_token():
+        return
+    key = webapp.new_session(msg.chat.id)
+    url = webapp.public_url(key)
+    if not url:
+        logging.warning("captcha webapp: RAILWAY_PUBLIC_DOMAIN not set")
+        return
+    await state.update_data(captcha_iin=iin)
+    await msg.answer(
+        "🔐 Резервный источник (НСК) просит пройти проверку «я не робот».\n"
+        "Нажмите кнопку ниже — после проверки поиск повторится автоматически.",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="🔓 Пройти проверку", web_app=WebAppInfo(url=url))]],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        ),
+    )
+
+
+@dp.message(F.web_app_data)
+async def on_webapp_data(msg: Message, state: FSMContext):
+    await msg.answer("✅ Проверка пройдена.", reply_markup=ReplyKeyboardRemove())
+    data = await state.get_data()
+    iin = data.get("captcha_iin")
+    if not iin:
+        return
+    await _do_iin_search(msg, state, iin)
 
 
 @dp.message(Form.p_iin_input, F.text)
@@ -1025,8 +1102,10 @@ async def _next_person_or_car(msg: Message, state: FSMContext):
     if idx + 1 < n:
         await state.update_data(current_person=idx + 1)
         await _ask_iin(msg, state)
-    else:
-        await _ask_car_brand(msg, state)
+        return
+    if await _after_edit(msg, state):
+        return
+    await _ask_car_brand(msg, state)
 
 
 async def _ask_car_brand(msg: Message, state: FSMContext):
@@ -1096,6 +1175,7 @@ async def _show_final_summary(msg: Message, state: FSMContext):
         f"<b>Дата договора:</b> {h(dogovor_date_str)}\n"
         f"<b>Период действия:</b> {h(date_from_str)} — {h(date_to_str)}"
     )
+    await state.update_data(edit_mode=False)
     await msg.answer(summary, parse_mode="HTML", reply_markup=final_confirm_keyboard())
     await state.set_state(Form.final_confirm)
 
@@ -1108,18 +1188,94 @@ async def on_restart(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
+@dp.callback_query(Form.final_confirm, F.data == "fin:edit")
+async def on_final_edit(cb: CallbackQuery, state: FSMContext):
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.message.answer(
+        "<b>Что изменить?</b>", parse_mode="HTML", reply_markup=edit_menu_keyboard()
+    )
+    await state.set_state(Form.edit_menu)
+    await cb.answer()
+
+
+@dp.callback_query(Form.error_retry, F.data == "er:cancel")
+async def on_error_cancel(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.message.answer("Отменено. Для нового полиса — /start.")
+    await cb.answer()
+
+
+@dp.callback_query(Form.error_retry, F.data == "er:edit")
+async def on_error_edit(cb: CallbackQuery, state: FSMContext):
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.message.answer(
+        "<b>Что изменить?</b>", parse_mode="HTML", reply_markup=edit_menu_keyboard()
+    )
+    await state.set_state(Form.edit_menu)
+    await cb.answer()
+
+
+@dp.callback_query(Form.edit_menu, F.data.startswith("ed:"))
+async def on_edit_pick(cb: CallbackQuery, state: FSMContext):
+    what = cb.data.split(":", 1)[1]
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.answer()
+
+    if what == "back":
+        await _show_final_summary(cb.message, state)
+        return
+
+    await state.update_data(edit_mode=True)
+
+    if what == "sum":
+        await cb.message.answer(
+            "<b>Введите сумму страховки в тенге.</b>\nНапример: <code>15000</code>",
+            parse_mode="HTML",
+        )
+        await state.set_state(Form.sum_input)
+    elif what == "dates":
+        await cb.message.answer(
+            "<b>Дата договора</b> (формат <code>ДД.ММ.ГГГГ</code>):", parse_mode="HTML"
+        )
+        await state.set_state(Form.dogovor_date_input)
+    elif what == "dogovor":
+        await cb.message.answer(
+            "<b>Номер договора</b> — как заполнить?",
+            parse_mode="HTML",
+            reply_markup=dogovor_keyboard(),
+        )
+        await state.set_state(Form.dogovor_choice)
+    elif what == "car":
+        await _ask_car_brand(cb.message, state)
+    elif what == "persons":
+        await state.update_data(current_person=0)
+        await _ask_iin(cb.message, state)
+
+
+@dp.callback_query(Form.error_retry, F.data == "er:retry")
+async def on_error_retry(cb: CallbackQuery, state: FSMContext):
+    await cb.answer("Повторяю…")
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await _generate_and_send(cb.message, state, cb.from_user)
+
+
 @dp.callback_query(Form.final_confirm, F.data == "fin:yes")
 async def on_final_yes(cb: CallbackQuery, state: FSMContext):
-    user_id = cb.from_user.id
+    await cb.answer("Документ создаётся…")
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await _generate_and_send(cb.message, state, cb.from_user)
+
+
+async def _generate_and_send(msg: Message, state: FSMContext, user):
+    user_id = user.id
     admin = is_admin(user_id)
     new_balance = None
     if not admin:
         new_balance = await change_balance(user_id, -POLIS_PRICE, "polis", meta="reserve")
         if new_balance is None:
             current = await get_balance(user_id)
-            await cb.answer()
-            await cb.message.edit_reply_markup(reply_markup=None)
-            await cb.message.answer(
+            await msg.answer(
                 f"⚠️ Недостаточно средств на балансе.\n\n"
                 f"Стоимость: <b>{fmt_money(POLIS_PRICE)}</b>\n"
                 f"Ваш баланс: <b>{fmt_money(current)}</b>\n\n"
@@ -1129,12 +1285,10 @@ async def on_final_yes(cb: CallbackQuery, state: FSMContext):
             await state.clear()
             return
 
-    await cb.answer("Документ создаётся…")
-    await cb.message.edit_reply_markup(reply_markup=None)
     if admin:
-        wait_msg = await cb.message.answer("⏳ Генерация PDF… (бесплатно, админ)")
+        wait_msg = await msg.answer("⏳ Генерация PDF… (бесплатно, админ)")
     else:
-        wait_msg = await cb.message.answer(
+        wait_msg = await msg.answer(
             f"⏳ Генерация PDF…\n"
             f"Списано с баланса: <b>−{fmt_money(POLIS_PRICE)}</b> (баланс: {fmt_money(new_balance)})",
             parse_mode="HTML",
@@ -1152,30 +1306,24 @@ async def on_final_yes(cb: CallbackQuery, state: FSMContext):
 
     try:
         await generate_pdf(data, pdf_path)
-    except PdfError as e:
+    except Exception as e:
+        if isinstance(e, PdfError):
+            label = "Ошибка"
+        else:
+            logging.exception("generate_pdf failed")
+            label = "Неизвестная ошибка"
+        text = f"❌ {label}: {h(str(e))}"
         if not admin:
             refunded = await change_balance(user_id, POLIS_PRICE, "refund", meta=str(e))
-            await wait_msg.edit_text(
-                f"❌ Ошибка: {h(str(e))}\n\n"
-                f"Баланс возвращён: <b>+{fmt_money(POLIS_PRICE)}</b> (баланс: {fmt_money(refunded or 0)})",
-                parse_mode="HTML",
+            text += (
+                f"\n\nБаланс возвращён: <b>+{fmt_money(POLIS_PRICE)}</b> "
+                f"(баланс: {fmt_money(refunded or 0)})"
             )
-        else:
-            await wait_msg.edit_text(f"❌ Ошибка: {h(str(e))}", parse_mode="HTML")
-        await state.clear()
-        return
-    except Exception as e:
-        logging.exception("generate_pdf failed")
-        if not admin:
-            refunded = await change_balance(user_id, POLIS_PRICE, "refund", meta=f"unexpected: {e}")
-            await wait_msg.edit_text(
-                f"❌ Неизвестная ошибка: {h(str(e))}\n\n"
-                f"Баланс возвращён: <b>+{fmt_money(POLIS_PRICE)}</b> (баланс: {fmt_money(refunded or 0)})",
-                parse_mode="HTML",
-            )
-        else:
-            await wait_msg.edit_text(f"❌ Неизвестная ошибка: {h(str(e))}", parse_mode="HTML")
-        await state.clear()
+        text += "\n\nДанные сохранены — можно повторить или изменить."
+        await wait_msg.edit_text(
+            text, parse_mode="HTML", reply_markup=error_retry_keyboard()
+        )
+        await state.set_state(Form.error_retry)
         return
 
     try:
@@ -1185,9 +1333,7 @@ async def on_final_yes(cb: CallbackQuery, state: FSMContext):
 
     trace_id = gen_trace_id()
     try:
-        await log_polis(
-            trace_id, user_id, cb.from_user.username, cb.from_user.first_name, data
-        )
+        await log_polis(trace_id, user_id, user.username, user.first_name, data)
     except Exception:
         logging.exception("log_polis failed")
 
@@ -1200,13 +1346,13 @@ async def on_final_yes(cb: CallbackQuery, state: FSMContext):
             f"✅ Полис готов!\nОстаток баланса: <b>{fmt_money(final_balance)}</b>"
             + trace_line + DISCLAIMER
         )
-    await cb.message.answer_document(
+    await msg.answer_document(
         FSInputFile(pdf_path, filename=filename_display),
         caption=caption,
         parse_mode="HTML",
     )
     await state.clear()
-    await cb.message.answer("Для нового полиса — /start.")
+    await msg.answer("Для нового полиса — /start.")
 
 
 async def setup_bot_commands():
@@ -1236,6 +1382,7 @@ async def setup_bot_commands():
 async def main():
     await init_db()
     await setup_bot_commands()
+    await webapp.start_webserver()
     await dp.start_polling(bot)
 
 

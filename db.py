@@ -65,8 +65,12 @@ async def ensure_user(
     telegram_id: int,
     username: str | None,
     first_name: str | None,
+    welcome_bonus: int = 0,
 ) -> bool:
-    """Create-or-update user. Returns True if user was newly created."""
+    """Create-or-update user. Returns True if user was newly created.
+
+    If welcome_bonus > 0 and user is new, credits the bonus atomically.
+    """
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         async with db.execute(
@@ -79,10 +83,16 @@ async def ensure_user(
                 (username, first_name, telegram_id),
             )
         else:
+            initial = welcome_bonus if welcome_bonus > 0 else 0
             await db.execute(
-                "INSERT INTO users (telegram_id, username, first_name) VALUES (?, ?, ?)",
-                (telegram_id, username, first_name),
+                "INSERT INTO users (telegram_id, username, first_name, balance) VALUES (?, ?, ?, ?)",
+                (telegram_id, username, first_name, initial),
             )
+            if initial > 0:
+                await db.execute(
+                    "INSERT INTO transactions (telegram_id, amount, type, meta) VALUES (?, ?, ?, ?)",
+                    (telegram_id, initial, "topup", "welcome_bonus"),
+                )
         await db.commit()
         return not existed
 

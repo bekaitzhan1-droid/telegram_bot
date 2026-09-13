@@ -51,7 +51,7 @@ PDF_FIELDS = (
     "amount", "date_from", "date_to", "dogovor_date",
 )
 
-MAX_ATTEMPTS = 3
+MAX_ATTEMPTS = 4
 RETRY_DELAY_SECONDS = 2
 
 
@@ -59,11 +59,23 @@ class PdfError(RuntimeError):
     pass
 
 
+class _Transient(Exception):
+    """Retryable failure (Google-side hiccup), not a data problem."""
+
+
+# Apps Script /exec redirects to script.googleusercontent.com with a
+# single-use, short-lived user_content_key. That key intermittently 404s,
+# and Google returns 429/5xx under load. All of these clear on a retry.
+RETRY_STATUSES = {404, 408, 425, 429, 500, 502, 503, 504}
+
+
 async def _call_once(url: str, payload: dict) -> bytes:
     connector = aiohttp.TCPConnector(ssl=_ssl_ctx)
     timeout = aiohttp.ClientTimeout(total=120)
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as sess:
         async with sess.post(url, json=payload, allow_redirects=True) as resp:
+            if resp.status in RETRY_STATUSES:
+                raise _Transient(f"Apps Script HTTP {resp.status}")
             if resp.status != 200:
                 raise PdfError(f"Apps Script HTTP {resp.status}")
             body = await resp.json(content_type=None)
@@ -100,10 +112,10 @@ async def generate_pdf(data: dict, output_path: Path) -> Path:
             pdf_bytes = await _call_once(url, payload)
             output_path.write_bytes(pdf_bytes)
             return output_path
-        except (aiohttp.ClientConnectorError, aiohttp.ClientConnectionError,
-                asyncio.TimeoutError) as e:
+        except (_Transient, aiohttp.ClientConnectorError,
+                aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
             last_err = e
-            logging.warning(f"generate_pdf attempt {attempt} network error: {e}")
+            logging.warning(f"generate_pdf attempt {attempt} retryable: {e}")
             if attempt < MAX_ATTEMPTS:
                 await asyncio.sleep(RETRY_DELAY_SECONDS * attempt)
         except PdfError:
@@ -114,4 +126,4 @@ async def generate_pdf(data: dict, output_path: Path) -> Path:
             if attempt < MAX_ATTEMPTS:
                 await asyncio.sleep(RETRY_DELAY_SECONDS * attempt)
 
-    raise PdfError(f"Интернет/желі қатесі ({MAX_ATTEMPTS} рет тырыстым): {last_err}")
+    raise PdfError(f"Сервис Google не ответил ({MAX_ATTEMPTS} попытки): {last_err}")

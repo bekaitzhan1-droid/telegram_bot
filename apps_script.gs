@@ -62,6 +62,9 @@ function doPost(e) {
       // 2nd car fields (only when cars_count >= 2 AND people_count == 1)
       // The template must contain {{car_brand_2}}, {{car_number_2}}, {{vin_2}}
       // placeholders for these to show up. Unfilled placeholders are blanked.
+      // 1 машина болса — 2-ші машина жолын кестеден толық алып тастаймыз
+      // (бос «2 | | |» жолы PDF-те көрінбесін).
+      if (carsCount < 2) _removeRowsContaining(body, '{{car_brand_2}}');
       _replace(body, '{{car_brand_2}}',  carsCount >= 2 ? data.car_brand_2  : '');
       _replace(body, '{{car_number_2}}', carsCount >= 2 ? data.car_number_2 : '');
       _replace(body, '{{vin_2}}',        carsCount >= 2 ? data.vin_2        : '');
@@ -137,27 +140,25 @@ function setupSecondCar() {
     return '❌ 1-ші машина жолы табылмады';
   }
 
-  // Insert a new row below the data row with the same structure
-  const newRow = carTable.insertTableRow(dataRowIdx + 1);
+  // Copy the 1st car row (keeps fonts, borders, widths) and swap its
+  // placeholders for the _2 versions.
   const srcRow = carTable.getRow(dataRowIdx);
-  for (let c = 0; c < srcRow.getNumCells(); c++) {
-    newRow.appendTableCell();  // ensure the right cell count
-  }
-
-  const placeholders = ['2', '{{car_brand_2}}', '{{car_number_2}}', '{{vin_2}}'];
-  for (let c = 0; c < newRow.getNumCells(); c++) {
-    const cell = newRow.getCell(c);
-    // Clear default cell content
-    const n = cell.getNumChildren();
-    for (let i = n - 1; i >= 0; i--) {
-      try { cell.getChild(i).removeFromParent(); } catch (_) {}
-    }
-    const txt = placeholders[c] || '';
-    cell.appendParagraph(txt).editAsText().setBold(true);
+  const newRow = carTable.insertTableRow(dataRowIdx + 1, srcRow.copy());
+  newRow.replaceText('\\{\\{car_brand\\}\\}',  '{{car_brand_2}}');
+  newRow.replaceText('\\{\\{car_number\\}\\}', '{{car_number_2}}');
+  newRow.replaceText('\\{\\{vin\\}\\}',        '{{vin_2}}');
+  // Row number cell: "1" → "2"
+  const numText = newRow.getCell(0).editAsText();
+  const numLen = numText.getText().length;
+  if (numLen > 0) {
+    numText.deleteText(0, numLen - 1);
+    numText.insertText(0, '2');
   }
 
   doc.saveAndClose();
-  return '✅ 2-ші машина жолы қосылды: ' + placeholders.join(' | ');
+  const out = '✅ 2-ші машина жолы қосылды: ' + newRow.getText().replace(/\s+/g, ' | ');
+  console.log(out);
+  return out;
 }
 
 // ============================================================================
@@ -263,6 +264,18 @@ function _replace(body, placeholder, value) {
 // One-shot swap: source text → target placeholder. Idempotent (no-op if source absent).
 function _swap(body, from, to) {
   body.replaceText(_escapeRegex(from), to);
+}
+
+// Remove every table row whose text contains `marker`.
+function _removeRowsContaining(body, marker) {
+  const tables = body.getTables();
+  for (const table of tables) {
+    for (let r = table.getNumRows() - 1; r >= 0; r--) {
+      if (table.getRow(r).getText().indexOf(marker) >= 0) {
+        table.removeRow(r);
+      }
+    }
+  }
 }
 
 function _escapeRegex(s) {

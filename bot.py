@@ -289,7 +289,13 @@ def edit_menu_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def car_more_keyboard() -> InlineKeyboardMarkup:
+def car_more_keyboard(has_second: bool = False) -> InlineKeyboardMarkup:
+    if has_second:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Оставить как есть", callback_data="cm:keep")],
+            [InlineKeyboardButton(text="✏️ Изменить машину №2", callback_data="cm:add")],
+            [InlineKeyboardButton(text="🗑 Убрать машину №2", callback_data="cm:done")],
+        ])
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить ещё машину", callback_data="cm:add")],
         [InlineKeyboardButton(text="✅ Готово — одна машина", callback_data="cm:done")],
@@ -1171,19 +1177,25 @@ async def on_car_number(msg: Message, state: FSMContext):
 async def on_vin(msg: Message, state: FSMContext):
     await state.update_data(vin=msg.text.strip().upper())
     data = await state.get_data()
-    # Only offer "Add another car" when there is exactly 1 driver,
-    # we're not re-editing, and no second car has been entered yet.
-    if (
-        data.get("people_count", 1) == 1
-        and not data.get("edit_mode")
-        and not data.get("car_brand_2")
-    ):
-        await msg.answer(
-            "<b>🚗 Добавить ещё одну машину?</b>\n"
-            "<i>Один водитель может оформить до 2 машин в полисе.</i>",
-            parse_mode="HTML",
-            reply_markup=car_more_keyboard(),
-        )
+    # 2nd car is only allowed with exactly 1 driver. Asked both on first
+    # entry and when editing "Авто" (so car №2 can be changed or removed).
+    if int(data.get("people_count", 1) or 1) == 1:
+        if data.get("car_brand_2"):
+            await msg.answer(
+                "<b>🚗 Машина №2:</b> "
+                f"{h(data.get('car_brand_2', ''))} | "
+                f"<code>{h(data.get('car_number_2', ''))}</code>\n"
+                "Что сделать со второй машиной?",
+                parse_mode="HTML",
+                reply_markup=car_more_keyboard(has_second=True),
+            )
+        else:
+            await msg.answer(
+                "<b>🚗 Добавить ещё одну машину?</b>\n"
+                "<i>Один водитель может оформить до 2 машин в полисе.</i>",
+                parse_mode="HTML",
+                reply_markup=car_more_keyboard(),
+            )
         await state.set_state(Form.car_more)
         return
     await _show_final_summary(msg, state)
@@ -1202,6 +1214,14 @@ async def on_car_more_add(cb: CallbackQuery, state: FSMContext):
 async def on_car_more_done(cb: CallbackQuery, state: FSMContext):
     await state.update_data(cars_count=1, car_brand_2="", car_number_2="", vin_2="")
     await cb.message.edit_text("Количество машин: <b>1</b> ✅", parse_mode="HTML")
+    await cb.answer()
+    await _show_final_summary(cb.message, state)
+
+
+@dp.callback_query(Form.car_more, F.data == "cm:keep")
+async def on_car_more_keep(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(cars_count=2)
+    await cb.message.edit_text("Количество машин: <b>2</b> ✅", parse_mode="HTML")
     await cb.answer()
     await _show_final_summary(cb.message, state)
 

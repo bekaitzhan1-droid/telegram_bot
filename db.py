@@ -41,6 +41,10 @@ CREATE TABLE IF NOT EXISTS polis_log (
     car_brand    TEXT,
     car_number   TEXT,
     vin          TEXT,
+    cars_count   INTEGER DEFAULT 1,
+    car_brand_2  TEXT,
+    car_number_2 TEXT,
+    vin_2        TEXT,
     persons_json TEXT,
     created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -58,6 +62,17 @@ async def init_db():
             await db.execute("ALTER TABLE users ADD COLUMN tos_accepted_at TIMESTAMP")
         except aiosqlite.OperationalError:
             pass  # column already exists
+        # Migration: add 2nd-car columns to existing polis_log tables
+        for col, ddl in (
+            ("cars_count",   "ALTER TABLE polis_log ADD COLUMN cars_count INTEGER DEFAULT 1"),
+            ("car_brand_2",  "ALTER TABLE polis_log ADD COLUMN car_brand_2 TEXT"),
+            ("car_number_2", "ALTER TABLE polis_log ADD COLUMN car_number_2 TEXT"),
+            ("vin_2",        "ALTER TABLE polis_log ADD COLUMN vin_2 TEXT"),
+        ):
+            try:
+                await db.execute(ddl)
+            except aiosqlite.OperationalError:
+                pass  # column already exists
         await db.commit()
 
 
@@ -137,8 +152,10 @@ async def log_polis(
             """INSERT INTO polis_log
             (trace_id, telegram_id, username, first_name, dogovor_no, amount,
              period_key, dogovor_date, date_from, date_to,
-             car_brand, car_number, vin, persons_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             car_brand, car_number, vin,
+             cars_count, car_brand_2, car_number_2, vin_2,
+             persons_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 trace_id, telegram_id, username, first_name,
                 data.get("dogovor_no", ""),
@@ -150,6 +167,10 @@ async def log_polis(
                 data.get("car_brand", ""),
                 data.get("car_number", ""),
                 data.get("vin", ""),
+                int(data.get("cars_count", 1) or 1),
+                data.get("car_brand_2", ""),
+                data.get("car_number_2", ""),
+                data.get("vin_2", ""),
                 json.dumps(data.get("persons", []), ensure_ascii=False),
             ),
         )

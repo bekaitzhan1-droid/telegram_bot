@@ -40,6 +40,7 @@ function doPost(e) {
     if (!templateId) return _json({ ok: false, error: 'template not found' });
 
     const persons = Array.isArray(data.persons) ? data.persons : [];
+    const carsCount = parseInt(data.cars_count || 1, 10) || 1;
 
     const copy = DriveApp.getFileById(templateId).makeCopy('polis_' + Date.now());
     const copyId = copy.getId();
@@ -57,6 +58,13 @@ function doPost(e) {
       _replace(body, '{{date_from}}',    data.date_from);
       _replace(body, '{{date_to}}',      data.date_to);
       _replace(body, '{{dogovor_date}}', data.dogovor_date);
+
+      // 2nd car fields (only when cars_count >= 2 AND people_count == 1)
+      // The template must contain {{car_brand_2}}, {{car_number_2}}, {{vin_2}}
+      // placeholders for these to show up. Unfilled placeholders are blanked.
+      _replace(body, '{{car_brand_2}}',  carsCount >= 2 ? data.car_brand_2  : '');
+      _replace(body, '{{car_number_2}}', carsCount >= 2 ? data.car_number_2 : '');
+      _replace(body, '{{vin_2}}',        carsCount >= 2 ? data.vin_2        : '');
 
       // Per-person fields
       for (let i = 0; i < count; i++) {

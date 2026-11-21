@@ -48,6 +48,7 @@ _ssl_ctx = ssl.create_default_context(cafile=certifi.where())
 PDF_FIELDS = (
     "dogovor_no",
     "car_brand", "car_number", "vin",
+    "car_brand_2", "car_number_2", "vin_2",
     "amount", "date_from", "date_to", "dogovor_date",
 )
 
@@ -97,6 +98,12 @@ async def generate_pdf(data: dict, output_path: Path) -> Path:
     for k in PDF_FIELDS:
         payload[k] = str(data.get(k, ""))
     payload["people_count"] = people_count
+    # cars_count: 1 or 2 (only when people_count == 1)
+    try:
+        cars_count = int(data.get("cars_count", 1) or 1)
+    except (TypeError, ValueError):
+        cars_count = 1
+    payload["cars_count"] = cars_count
     payload["persons"] = [
         {
             "fio": str(p.get("fio", "")),

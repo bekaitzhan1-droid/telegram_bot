@@ -76,7 +76,15 @@ PERIODS = {
 
 CLASS_OPTIONS = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "M", "M1", "M2", "A"]
 
-STANDARD_DOGOVOR_NO = "0656T160437N"
+# Dogovor number format: 0656T + 6 random digits + N  (Nomad Транзит-тің форматы)
+DOGOVOR_PREFIX = "0656T"
+DOGOVOR_SUFFIX = "N"
+
+
+def gen_dogovor_no() -> str:
+    """Generate a unique dogovor number per polis."""
+    digits = "".join(secrets.choice("0123456789") for _ in range(6))
+    return f"{DOGOVOR_PREFIX}{digits}{DOGOVOR_SUFFIX}"
 
 DISCLAIMER = (
     "\n\n<i>⚠️ Полис выдан для личного использования держателем. "
@@ -138,6 +146,10 @@ class Form(StatesGroup):
     car_brand = State()
     car_number = State()
     vin = State()
+    car_more = State()
+    car_brand_2 = State()
+    car_number_2 = State()
+    vin_2 = State()
     final_confirm = State()
     error_retry = State()
     edit_menu = State()
@@ -214,7 +226,7 @@ def dates_confirm_keyboard() -> InlineKeyboardMarkup:
 
 def dogovor_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"📋 Стандартный ({STANDARD_DOGOVOR_NO})", callback_data="do:std")],
+        [InlineKeyboardButton(text=f"🎲 Автогенерация ({DOGOVOR_PREFIX}XXXXXX{DOGOVOR_SUFFIX})", callback_data="do:std")],
         [InlineKeyboardButton(text="✍️ Ввести вручную", callback_data="do:man")],
         [InlineKeyboardButton(text="⬜ Оставить пустым", callback_data="do:none")],
     ])
@@ -274,6 +286,13 @@ def edit_menu_keyboard() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="🚗 Авто", callback_data="ed:car")],
         [InlineKeyboardButton(text="👤 Застрахованные", callback_data="ed:persons")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="ed:back")],
+    ])
+
+
+def car_more_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить ещё машину", callback_data="cm:add")],
+        [InlineKeyboardButton(text="✅ Готово — одна машина", callback_data="cm:done")],
     ])
 
 
@@ -404,6 +423,11 @@ async def on_people_count(cb: CallbackQuery, state: FSMContext):
         persons=[],
         current_person=0,
         company=DEFAULT_COMPANY,
+        # Reset 2nd car — it's only allowed with 1 driver
+        cars_count=1,
+        car_brand_2="",
+        car_number_2="",
+        vin_2="",
     )
     await cb.message.edit_text(f"Кол-во застрахованных: <b>{n}</b> ✅", parse_mode="HTML")
     await cb.message.answer(
@@ -613,6 +637,23 @@ async def cmd_log(msg: Message):
     if log.get('first_name'):
         user_label += f" — {h(log['first_name'])}"
 
+    cars_count = int(log.get('cars_count') or 1)
+    if cars_count >= 2 and log.get('car_brand_2'):
+        cars_text = (
+            f"<b>Авто №1:</b> {h(log.get('car_brand') or '')} | "
+            f"<code>{h(log.get('car_number') or '')}</code> | "
+            f"VIN: <code>{h(log.get('vin') or '')}</code>\n"
+            f"<b>Авто №2:</b> {h(log.get('car_brand_2') or '')} | "
+            f"<code>{h(log.get('car_number_2') or '')}</code> | "
+            f"VIN: <code>{h(log.get('vin_2') or '')}</code>"
+        )
+    else:
+        cars_text = (
+            f"<b>Авто:</b> {h(log.get('car_brand') or '')} | "
+            f"<code>{h(log.get('car_number') or '')}</code> | "
+            f"VIN: <code>{h(log.get('vin') or '')}</code>"
+        )
+
     text = (
         f"<b>📋 Полис {h(log['trace_id'])}</b>\n\n"
         f"<b>Создал:</b> {user_label}\n"
@@ -620,9 +661,7 @@ async def cmd_log(msg: Message):
         f"<b>Договор №:</b> <code>{h(log.get('dogovor_no') or '(пусто)')}</code>\n"
         f"<b>Сумма:</b> {h(log.get('amount') or '')}\n"
         f"<b>Период:</b> {h(log.get('date_from') or '')} — {h(log.get('date_to') or '')}\n\n"
-        f"<b>Авто:</b> {h(log.get('car_brand') or '')} | "
-        f"<code>{h(log.get('car_number') or '')}</code> | "
-        f"VIN: <code>{h(log.get('vin') or '')}</code>\n\n"
+        f"{cars_text}\n\n"
         f"<b>Застрахованные:</b>\n{persons_text}"
     )
     await msg.answer(text, parse_mode="HTML")
@@ -844,8 +883,9 @@ async def on_sum_yes(cb: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(Form.dogovor_choice, F.data == "do:std")
 async def on_dogovor_std(cb: CallbackQuery, state: FSMContext):
-    await state.update_data(dogovor_no=STANDARD_DOGOVOR_NO)
-    await cb.message.edit_text(f"Номер договора: <code>{STANDARD_DOGOVOR_NO}</code> ✅", parse_mode="HTML")
+    new_no = gen_dogovor_no()
+    await state.update_data(dogovor_no=new_no)
+    await cb.message.edit_text(f"Номер договора: <code>{new_no}</code> ✅", parse_mode="HTML")
     await cb.answer()
     if await _after_edit(cb.message, state):
         return
@@ -1130,6 +1170,59 @@ async def on_car_number(msg: Message, state: FSMContext):
 @dp.message(Form.vin, F.text)
 async def on_vin(msg: Message, state: FSMContext):
     await state.update_data(vin=msg.text.strip().upper())
+    data = await state.get_data()
+    # Only offer "Add another car" when there is exactly 1 driver,
+    # we're not re-editing, and no second car has been entered yet.
+    if (
+        data.get("people_count", 1) == 1
+        and not data.get("edit_mode")
+        and not data.get("car_brand_2")
+    ):
+        await msg.answer(
+            "<b>🚗 Добавить ещё одну машину?</b>\n"
+            "<i>Один водитель может оформить до 2 машин в полисе.</i>",
+            parse_mode="HTML",
+            reply_markup=car_more_keyboard(),
+        )
+        await state.set_state(Form.car_more)
+        return
+    await _show_final_summary(msg, state)
+
+
+@dp.callback_query(Form.car_more, F.data == "cm:add")
+async def on_car_more_add(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(cars_count=2)
+    await cb.message.edit_text("Количество машин: <b>2</b> ✅", parse_mode="HTML")
+    await cb.message.answer("<b>🚗 Машина №2 — Марка и модель</b>:", parse_mode="HTML")
+    await state.set_state(Form.car_brand_2)
+    await cb.answer()
+
+
+@dp.callback_query(Form.car_more, F.data == "cm:done")
+async def on_car_more_done(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(cars_count=1, car_brand_2="", car_number_2="", vin_2="")
+    await cb.message.edit_text("Количество машин: <b>1</b> ✅", parse_mode="HTML")
+    await cb.answer()
+    await _show_final_summary(cb.message, state)
+
+
+@dp.message(Form.car_brand_2, F.text)
+async def on_brand_2(msg: Message, state: FSMContext):
+    await state.update_data(car_brand_2=msg.text.strip().upper())
+    await msg.answer("<b>🚗 Машина №2 — Гос. номер</b>:", parse_mode="HTML")
+    await state.set_state(Form.car_number_2)
+
+
+@dp.message(Form.car_number_2, F.text)
+async def on_car_number_2(msg: Message, state: FSMContext):
+    await state.update_data(car_number_2=msg.text.strip().upper())
+    await msg.answer("<b>🚗 Машина №2 — VIN</b>:", parse_mode="HTML")
+    await state.set_state(Form.vin_2)
+
+
+@dp.message(Form.vin_2, F.text)
+async def on_vin_2(msg: Message, state: FSMContext):
+    await state.update_data(vin_2=msg.text.strip().upper(), cars_count=2)
     await _show_final_summary(msg, state)
 
 
@@ -1162,6 +1255,24 @@ async def _show_final_summary(msg: Message, state: FSMContext):
     persons_text = "\n".join(persons_lines)
 
     dogovor_display = data.get("dogovor_no") or "(пусто)"
+
+    cars_count = int(data.get("cars_count", 1) or 1)
+    if cars_count >= 2 and data.get("car_brand_2"):
+        cars_block = (
+            f"<b>🚗 Машина №1:</b> {h(data['car_brand'])}\n"
+            f"     Гос. номер: <code>{h(data['car_number'])}</code>\n"
+            f"     VIN: <code>{h(data['vin'])}</code>\n"
+            f"<b>🚗 Машина №2:</b> {h(data.get('car_brand_2', ''))}\n"
+            f"     Гос. номер: <code>{h(data.get('car_number_2', ''))}</code>\n"
+            f"     VIN: <code>{h(data.get('vin_2', ''))}</code>\n"
+        )
+    else:
+        cars_block = (
+            f"<b>Авто:</b> {h(data['car_brand'])}\n"
+            f"<b>Гос. номер:</b> <code>{h(data['car_number'])}</code>\n"
+            f"<b>VIN:</b> <code>{h(data['vin'])}</code>\n"
+        )
+
     summary = (
         "<b>Все данные:</b>\n\n"
         f"<b>Компания:</b> {h(COMPANIES[data['company']])}\n"
@@ -1169,9 +1280,7 @@ async def _show_final_summary(msg: Message, state: FSMContext):
         f"<b>Сумма:</b> {h(data['amount'])}\n"
         f"<b>Договор №:</b> <code>{h(dogovor_display)}</code>\n\n"
         f"<b>Застрахованные ({data.get('people_count', 1)}):</b>\n{persons_text}\n\n"
-        f"<b>Авто:</b> {h(data['car_brand'])}\n"
-        f"<b>Гос. номер:</b> <code>{h(data['car_number'])}</code>\n"
-        f"<b>VIN:</b> <code>{h(data['vin'])}</code>\n"
+        f"{cars_block}"
         f"<b>Дата договора:</b> {h(dogovor_date_str)}\n"
         f"<b>Период действия:</b> {h(date_from_str)} — {h(date_to_str)}"
     )

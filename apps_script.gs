@@ -88,6 +88,79 @@ function doPost(e) {
 }
 
 // ============================================================================
+//  setupSecondCar() — 1-адам шаблонына 2-ші машина жолын қосады
+//  (бір рет іске қосылады, идемпотентті)
+// ============================================================================
+
+function setupSecondCar() {
+  const docId = TEMPLATES[1];
+  const doc = DocumentApp.openById(docId);
+  const body = doc.getBody();
+
+  const tables = body.getTables();
+  let carTable = null;
+  for (const t of tables) {
+    const txt = t.getText();
+    if (txt.indexOf('МАРКАСЫ') >= 0 || txt.indexOf('МАРКА,МОДЕЛЬ') >= 0 ||
+        txt.indexOf('ШАНАҚ') >= 0 || txt.indexOf('VIN') >= 0) {
+      carTable = t;
+      break;
+    }
+  }
+  if (!carTable) {
+    doc.saveAndClose();
+    return '❌ Көлік кестесі табылмады';
+  }
+
+  // Already has {{car_brand_2}} → skip (idempotent)
+  if (carTable.getText().indexOf('{{car_brand_2}}') >= 0) {
+    doc.saveAndClose();
+    return '✅ 2-ші машина жолы бұрыннан бар (өзгеріссіз)';
+  }
+
+  // Find row where cell[0] == '1' (the single-car data row)
+  const numRows = carTable.getNumRows();
+  let dataRowIdx = -1;
+  for (let r = 0; r < numRows; r++) {
+    const row = carTable.getRow(r);
+    if (row.getNumCells() >= 4 && row.getCell(0).getText().trim() === '1') {
+      // Confirm it's the car row (contains car_brand placeholder or similar)
+      const rowText = row.getText();
+      if (rowText.indexOf('{{car_brand}}') >= 0 || rowText.indexOf('{{vin}}') >= 0) {
+        dataRowIdx = r;
+        break;
+      }
+    }
+  }
+  if (dataRowIdx < 0) {
+    doc.saveAndClose();
+    return '❌ 1-ші машина жолы табылмады';
+  }
+
+  // Insert a new row below the data row with the same structure
+  const newRow = carTable.insertTableRow(dataRowIdx + 1);
+  const srcRow = carTable.getRow(dataRowIdx);
+  for (let c = 0; c < srcRow.getNumCells(); c++) {
+    newRow.appendTableCell();  // ensure the right cell count
+  }
+
+  const placeholders = ['2', '{{car_brand_2}}', '{{car_number_2}}', '{{vin_2}}'];
+  for (let c = 0; c < newRow.getNumCells(); c++) {
+    const cell = newRow.getCell(c);
+    // Clear default cell content
+    const n = cell.getNumChildren();
+    for (let i = n - 1; i >= 0; i--) {
+      try { cell.getChild(i).removeFromParent(); } catch (_) {}
+    }
+    const txt = placeholders[c] || '';
+    cell.appendParagraph(txt).editAsText().setBold(true);
+  }
+
+  doc.saveAndClose();
+  return '✅ 2-ші машина жолы қосылды: ' + placeholders.join(' | ');
+}
+
+// ============================================================================
 //  setup() — бір рет іске қосылып, шаблондарды бірыңғай форматқа келтіреді
 // ============================================================================
 
